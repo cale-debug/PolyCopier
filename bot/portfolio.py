@@ -20,6 +20,8 @@ DEFAULT_SETTINGS = {
     "prop_pct": 1.0,           # PROP: copy this % of his dollar size
     "min_his_bet": 0,          # skip his buys smaller than this ($)
     "us_only": True,           # only copy markets that also trade on Polymarket US
+    "once_per_market": True,   # copy his first buy of an outcome, not every fill after it
+    "skip_both_sides": True,   # don't buy the other side of a market we already hold
     "copy_sells": True,
     "halted": False,
     "kill": False,             # one-shot: sell everything, then halt

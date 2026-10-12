@@ -147,6 +147,12 @@ class Bot:
                 return skip(self.state, why)
             if self.settings.get("us_only", True) and not on_us:
                 return skip(self.state, "not on Polymarket US")
+            if self.settings.get("once_per_market", True) and asset in self.state["positions"]:
+                return skip(self.state, "already holding")
+            cond = t.get("conditionId")
+            if self.settings.get("skip_both_sides", True) and cond and any(
+                    p.get("condition_id") == cond and a != asset for a, p in self.state["positions"].items()):
+                return skip(self.state, "other side of a market we hold")
             if asset not in self.state["positions"] and len(self.state["positions"]) >= MAX_POSITIONS:
                 return skip(self.state, "too many open positions")
             usd = bet_size(self.settings, his_usd)

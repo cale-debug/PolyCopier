@@ -116,3 +116,15 @@ def test_us_market_matches_prefixed_slug_in_same_event(monkeypatch):
     assert live_us.us_market("epl-cov-new-2026-10-12-cov", "epl-cov-new-2026-10-12") == "atc-epl-cov-new-2026-10-12-cov"
     assert live_us.us_market("epl-cov-new-2026-10-12-total-3pt5", "epl-cov-new-2026-10-12") is None
     assert live_us.us_market("x", "other-event") is None
+
+
+def test_once_per_market_and_both_sides(tmp_path, monkeypatch):
+    monkeypatch.setattr(pm, "best_prices", lambda a: (0.38, 0.42))
+    monkeypatch.setattr(live_us, "us_market", lambda slug, event="": "atc-" + slug)
+    bot = main.Bot(LocalStore(str(tmp_path)))
+    t = dict(TRADE, conditionId="m1")
+    bot.copy(t, 1)
+    bot.copy(t, 1)                                  # another fill of the same buy
+    bot.copy(dict(t, asset="B", outcome="No"), 1)   # the other side of the same market
+    assert list(bot.state["positions"]) == ["A"]
+    assert bot.state["skipped"] == {"already holding": 1, "other side of a market we hold": 1}
