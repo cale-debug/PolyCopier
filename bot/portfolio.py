@@ -6,6 +6,7 @@ read by the dashboard as-is.
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Optional
 
@@ -72,6 +73,7 @@ def should_copy_buy(settings: dict, his_usd: float) -> Optional[str]:
 
 def skip(state: dict, reason: str) -> None:
     state["skipped"][reason] = state["skipped"].get(reason, 0) + 1
+    logging.getLogger("bot").info("skip: %s", reason)
 
 
 def _record(state: dict, **row) -> None:

@@ -112,6 +112,8 @@ class Bot:
         if not self.target():
             return
         trades = pm.new_trades(self.target(), cur["ts"])
+        if trades:
+            L.info("%d trade rows from target since %d", len(trades), cur["ts"])
         seen = set(cur["seen"])
         for t in trades:
             k = pm.trade_key(t)

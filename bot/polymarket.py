@@ -52,6 +52,7 @@ def new_trades(wallet: str, since_ts: int) -> List[dict]:
         out.extend(rows)
         if len(rows) < 500:
             break
+    out = [r for r in out if int(r.get("timestamp") or 0) >= since_ts]
     out.sort(key=lambda r: int(r.get("timestamp") or 0))
     return out
 
