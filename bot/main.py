@@ -156,6 +156,12 @@ class Bot:
             if asset not in self.state["positions"] and len(self.state["positions"]) >= MAX_POSITIONS:
                 return skip(self.state, "too many open positions")
             usd = bet_size(self.settings, his_usd)
+            equity = self.state["bank"] + exposure(self.state)
+            if equity < self.state["start_bank"] * (1 - float(self.settings.get("max_drawdown_pct", 25)) / 100):
+                self.halt(f"Account down {self.settings.get('max_drawdown_pct', 25)}% from start; halted")
+                return skip(self.state, "drawdown limit")
+            if exposure(self.state) + usd > equity * float(self.settings.get("max_exposure_pct", 50)) / 100:
+                return skip(self.state, "exposure limit")
             if self.mode == "live":
                 return self.live_buy(t, usd, us_slug, delay)
             _, ask = pm.best_prices(asset)
@@ -220,6 +226,13 @@ class Bot:
         shares, px = live_us.filled(resp)
         if shares > 0:
             sell(self.state, asset, min(1.0, shares / pos["shares"]), px, why)
+
+    def halt(self, why: str) -> None:
+        log(self.state, why)
+        s, _ = self.store.read("settings.json")
+        s = {**DEFAULT_SETTINGS, **(s or {}), "halted": True}
+        self.store.write("settings.json", s, "Auto-halt")
+        self.settings = s
 
     # ------------------------------------------------------------ upkeep --
     def kill_switch(self) -> None:

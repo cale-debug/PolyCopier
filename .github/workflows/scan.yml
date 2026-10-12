@@ -5,6 +5,9 @@ on:
       pool:
         description: How many traders to pull from each leaderboard
         default: "150"
+      category:
+        description: Leaderboard category (OVERALL, SPORTS, POLITICS, CRYPTO)
+        default: "SPORTS"
 jobs:
   scan:
     runs-on: ubuntu-latest
@@ -15,7 +18,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install requests
-      - run: python -u tools/scan_leaderboard.py --pool "${{ inputs.pool }}" | tee scan.md | tee -a "$GITHUB_STEP_SUMMARY"
+      - run: python -u tools/scan_leaderboard.py --pool "${{ inputs.pool }}" --category "${{ inputs.category }}" | tee scan.md | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
           name: scan

@@ -196,7 +196,11 @@ ol { padding-left: 20px; line-height: 1.6; } a { color: var(--neon); }
       <div class="label">Paper account</div>
       <div class="row" id="startBank">
         <button class="opt" data-v="100">$100</button><button class="opt" data-v="500">$500</button>
-        <button class="opt" data-v="1000">$1K</button><button class="opt" data-v="5000">$5K</button>
+        <button class="opt" data-v="1000">$1K</button><button class="opt" data-v="3000">$3K</button><button class="opt" data-v="5000">$5K</button>
+      </div>
+      <div class="cols" style="margin-top:12px">
+        <div><div class="label">Max % in open bets</div><input id="maxExp" inputmode="decimal"></div>
+        <div><div class="label">Halt if down %</div><input id="maxDd" inputmode="decimal"></div>
       </div>
       <div class="label" style="margin-top:12px">PROP size (% of his bet)</div>
       <input id="propPct" inputmode="decimal">
@@ -271,6 +275,8 @@ function renderSettings() {
   if (document.activeElement !== $("maxTrade")) $("maxTrade").value = settings.live_max_trade;
   if (document.activeElement !== $("dailyCap")) $("dailyCap").value = settings.live_daily_cap;
   if (document.activeElement !== $("propPct")) $("propPct").value = settings.prop_pct;
+  if (document.activeElement !== $("maxExp")) $("maxExp").value = settings.max_exposure_pct ?? 50;
+  if (document.activeElement !== $("maxDd")) $("maxDd").value = settings.max_drawdown_pct ?? 25;
   $("liveStatus").textContent = settings.mode === "live" ? "Live mode is ON." : "Paper mode. Nothing real is being bought.";
 }
 
@@ -354,6 +360,8 @@ document.querySelectorAll("#startBank .opt").forEach((b) => (b.onclick = () => s
 $("haltBtn").onclick = () => saveSettings({ halted: !(settings && settings.halted) }, settings && settings.halted ? "Resume" : "Halt");
 $("killBtn").onclick = () => { if (confirm("Sell every open position now and halt the bot?")) saveSettings({ kill: true }, "Kill switch"); };
 $("resetPaper").onclick = () => { if (confirm("Wipe the paper account and start over?")) saveSettings({ reset_paper: true }, "Reset paper"); };
+$("maxExp").onchange = () => saveSettings({ max_exposure_pct: Number($("maxExp").value) || 50 }, "Max exposure");
+$("maxDd").onchange = () => saveSettings({ max_drawdown_pct: Number($("maxDd").value) || 25 }, "Max drawdown");
 $("propPct").onchange = () => saveSettings({ prop_pct: Number($("propPct").value) || 1 }, "Prop %");
 $("maxTrade").onchange = () => saveSettings({ live_max_trade: Number($("maxTrade").value) || 1 }, "Live max trade");
 $("dailyCap").onchange = () => saveSettings({ live_daily_cap: Number($("dailyCap").value) || 10 }, "Live daily cap");

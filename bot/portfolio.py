@@ -28,7 +28,9 @@ DEFAULT_SETTINGS = {
     "mode": "paper",           # "paper" | "live"
     "live_max_trade": 5.0,     # live safety caps ($)
     "live_daily_cap": 50.0,
-    "paper_start_bank": 1000.0,
+    "paper_start_bank": 3000.0,
+    "max_exposure_pct": 50.0,  # never have more than this % of the account in open bets
+    "max_drawdown_pct": 25.0,  # halt if the account falls this % below where it started
     "reset_paper": False,      # one-shot: wipe paper history and start over
 }
 

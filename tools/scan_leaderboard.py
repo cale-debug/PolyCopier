@@ -37,10 +37,14 @@ def rows(x):
     return x if isinstance(x, list) else (x or {}).get("data") or []
 
 
+CATEGORY = "OVERALL"
+
+
 def board(period, n):
     out = {}
     for off in range(0, n, 50):
-        for r in rows(get(f"{D}/v1/leaderboard", {"timePeriod": period, "orderBy": "PNL", "limit": 50, "offset": off})):
+        for r in rows(get(f"{D}/v1/leaderboard", {"timePeriod": period, "orderBy": "PNL", "category": CATEGORY,
+                                                  "limit": 50, "offset": off})):
             out[str(r.get("proxyWallet", "")).lower()] = r
     return out
 
@@ -103,15 +107,18 @@ def score(w, name, lb):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--pool", type=int, default=150)
+    ap.add_argument("--category", default="OVERALL", help="OVERALL, SPORTS, POLITICS, CRYPTO, ...")
+    ap.add_argument("--need-week", action="store_true", help="also require a profitable week")
     args = ap.parse_args()
+    global CATEGORY
+    CATEGORY = args.category.upper()
     boards = {p: board(p, args.pool) for p in ("ALL", "MONTH", "WEEK")}
-    wallets = [w for w in boards["MONTH"]
-               if w in boards["ALL"] and w in boards["WEEK"]
-               and all(f(boards[p][w].get("pnl")) > 0 for p in boards)]
-    print(f"{len(wallets)} wallets are profitable on the all-time, month and week boards (top {args.pool} each)\n")
+    need = ("ALL", "MONTH", "WEEK") if args.need_week else ("ALL", "MONTH")
+    wallets = [w for w in boards["MONTH"] if all(w in boards[p] and f(boards[p][w].get("pnl")) > 0 for p in need)]
+    print(f"{len(wallets)} wallets are profitable on the {CATEGORY} {' + '.join(need)} boards (top {args.pool} each)\n")
     out = []
     for i, w in enumerate(wallets, 1):
-        r = score(w, boards["ALL"][w].get("userName"), {p: boards[p][w] for p in boards})
+        r = score(w, boards["ALL"][w].get("userName"), {p: boards[p].get(w, {}) for p in boards})
         if r:
             out.append(r)
     # Consistency first: win rate and green weeks, then return on money risked.

@@ -129,3 +129,19 @@ def test_once_per_market_and_both_sides(tmp_path, monkeypatch):
     bot.copy(dict(t, asset="B", outcome="No"), 1)   # the other side of the same market
     assert list(bot.state["positions"]) == ["A"]
     assert bot.state["skipped"] == {"already holding": 1, "other side of a market we hold": 1}
+
+
+def test_exposure_and_drawdown_limits(tmp_path, monkeypatch):
+    monkeypatch.setattr(pm, "best_prices", lambda a: (0.38, 0.42))
+    monkeypatch.setattr(live_us, "us_market", lambda slug, event="": "atc-" + slug)
+    store = LocalStore(str(tmp_path))
+    store.write("settings.json", {**DEFAULT_SETTINGS, "paper_start_bank": 10, "size_mode": "2",
+                                  "max_exposure_pct": 50}, "")
+    bot = main.Bot(store)
+    for i in range(5):
+        bot.copy(dict(TRADE, asset=f"A{i}", conditionId=f"m{i}"), 1)
+    assert len(bot.state["positions"]) == 2 and bot.state["skipped"]["exposure limit"] == 3
+    for p in bot.state["positions"].values():
+        p["cur"] = 0.01                                  # both bets collapse
+    bot.copy(dict(TRADE, asset="Z", conditionId="mz"), 1)
+    assert bot.settings["halted"] is True and store.read("settings.json")[0]["halted"] is True
