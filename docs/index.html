@@ -1,0 +1,436 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="PolyCopier">
+<meta name="theme-color" content="#02060f">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon.svg">
+<title>PolyCopier</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<script src="vendor/nacl-fast.min.js"></script>
+<script src="vendor/blake2b.js"></script>
+<script src="sealbox.js"></script>
+<style>
+:root {
+  --bg: #02060f; --panel: rgba(3, 14, 32, .82); --line: #0e3a6b; --neon: #2ee6ff; --neon2: #3d8bff;
+  --text: #bfefff; --dim: #4f86a8; --red: #ff3b5c; --green: #39ffb0; --amber: #ffc94d;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); font-family: "Share Tech Mono", ui-monospace, monospace; }
+body { min-height: 100vh; padding: max(16px, env(safe-area-inset-top)) 16px 40px; }
+canvas#rain { position: fixed; inset: 0; z-index: 0; opacity: .22; pointer-events: none; }
+main { position: relative; z-index: 1; max-width: 860px; margin: 0 auto; }
+h1 { font-size: 40px; letter-spacing: 10px; text-transform: uppercase; margin: 18px 0 2px; color: var(--neon); text-shadow: 0 0 6px var(--neon), 0 0 22px var(--neon2); font-weight: 400; }
+.sub { color: var(--dim); letter-spacing: 2px; font-size: 14px; }
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--dim); margin: 0 6px 0 10px; vertical-align: middle; }
+.dot.on { background: var(--neon); box-shadow: 0 0 8px var(--neon); }
+.dot.off { background: var(--red); box-shadow: 0 0 8px var(--red); }
+.tabs { display: flex; gap: 8px; margin: 18px 0 14px; }
+.tab { flex: 1; text-align: center; padding: 10px 0; border: 1px solid var(--line); color: var(--dim); letter-spacing: 3px; cursor: pointer; background: transparent; font: inherit; border-radius: 6px; }
+.tab.active { color: var(--bg); background: var(--neon); border-color: var(--neon); box-shadow: 0 0 14px var(--neon2); }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; margin-bottom: 14px; box-shadow: inset 0 0 24px rgba(46, 230, 255, .05); }
+.label { color: var(--dim); font-size: 12px; letter-spacing: 4px; text-transform: uppercase; margin-bottom: 6px; }
+.grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px 10px; }
+.val { font-size: 24px; color: var(--neon); text-shadow: 0 0 8px rgba(46, 230, 255, .6); }
+.val.neg { color: var(--red); text-shadow: 0 0 8px rgba(255, 59, 92, .5); }
+.badge { display: inline-block; margin-bottom: 12px; font-size: 12px; letter-spacing: 3px; padding: 4px 10px; border-radius: 4px; border: 1px solid var(--neon); color: var(--neon); }
+.badge.live { border-color: var(--red); color: var(--red); box-shadow: 0 0 10px var(--red); }
+input { width: 100%; background: #000; border: 1px solid var(--line); color: var(--neon); font: inherit; font-size: 20px; padding: 12px; border-radius: 6px; outline: none; }
+input:focus { border-color: var(--neon); box-shadow: 0 0 10px rgba(46, 230, 255, .35); }
+.hint { color: var(--dim); font-size: 13px; margin: 8px 0 12px; word-break: break-all; }
+button.big { width: 100%; padding: 16px; font: inherit; font-size: 20px; letter-spacing: 10px; border-radius: 6px; cursor: pointer; margin-top: 10px; border: 1px solid; }
+.halt { background: var(--red); color: #1a0006; border-color: var(--red); box-shadow: 0 0 16px rgba(255, 59, 92, .5); }
+.resume { background: var(--neon); color: var(--bg); border-color: var(--neon); box-shadow: 0 0 16px var(--neon2); }
+.kill { background: #1a0006; color: var(--red); border-color: var(--red); }
+.lock { background: transparent; color: var(--neon); border-color: var(--neon); }
+.row { display: flex; flex-wrap: wrap; gap: 8px; }
+.opt { padding: 10px 14px; border: 1px solid var(--line); background: #000; color: var(--dim); font: inherit; font-size: 17px; border-radius: 6px; cursor: pointer; min-width: 58px; }
+.opt.on { background: var(--neon); color: var(--bg); border-color: var(--neon); box-shadow: 0 0 10px var(--neon2); }
+.cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th { color: var(--dim); text-align: left; font-weight: 400; letter-spacing: 2px; padding: 6px 4px; border-bottom: 1px solid var(--line); }
+td { padding: 9px 4px; border-bottom: 1px solid rgba(14, 58, 107, .6); vertical-align: top; }
+td.n, th.n { text-align: right; white-space: nowrap; }
+.up { color: var(--green); } .down { color: var(--red); } .muted { color: var(--dim); }
+.feed div { padding: 6px 0; border-bottom: 1px solid rgba(14, 58, 107, .5); font-size: 14px; }
+canvas#eq { width: 100%; height: 120px; display: block; }
+.hidden { display: none; }
+.warn { border-color: var(--amber); color: var(--amber); }
+ol { padding-left: 20px; line-height: 1.6; } a { color: var(--neon); }
+.toast { position: fixed; left: 16px; right: 16px; bottom: 20px; z-index: 5; max-width: 600px; margin: auto; padding: 12px 14px; background: #031428; border: 1px solid var(--neon); border-radius: 6px; display: none; }
+@media (max-width: 560px) {
+  h1 { font-size: 28px; letter-spacing: 6px; }
+  .val { font-size: 19px; }
+  .cols { grid-template-columns: 1fr; }
+  .hide-sm { display: none; }
+  button.big { font-size: 17px; letter-spacing: 5px; }
+  .kill { letter-spacing: 2px; }
+}
+</style>
+</head>
+<body>
+<canvas id="rain"></canvas>
+<main>
+  <h1>PolyCopier</h1>
+  <div class="sub">watcher // live copy <span class="dot" id="hb"></span><span id="hbtext">CONNECTING</span></div>
+
+  <div class="tabs">
+    <button class="tab active" data-tab="dash">DASH</button>
+    <button class="tab" data-tab="live">GO LIVE</button>
+    <button class="tab" data-tab="setup">SETUP</button>
+  </div>
+
+  <!-- ===================== DASH ===================== -->
+  <section id="tab-dash">
+    <div class="panel">
+      <span class="badge" id="mode">PAPER</span>
+      <div class="grid">
+        <div><div class="label">Bank</div><div class="val" id="bank">-</div></div>
+        <div><div class="label">Exposure</div><div class="val" id="exposure">-</div></div>
+        <div><div class="label">Total P&amp;L</div><div class="val" id="pnl">-</div></div>
+        <div><div class="label">Realized</div><div class="val" id="realized">-</div></div>
+        <div><div class="label">W / L</div><div class="val" id="wl">-</div></div>
+        <div><div class="label">Positions</div><div class="val" id="npos">-</div></div>
+      </div>
+      <canvas id="eq" height="120"></canvas>
+      <div class="hint" id="usline"></div>
+    </div>
+
+    <div class="panel">
+      <div class="label">Target // username or 0x wallet</div>
+      <input id="target" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <div class="hint" id="locked">&gt; loading…</div>
+      <div class="hint" id="hisline"></div>
+      <button class="big lock" id="lockBtn">LOCK TARGET</button>
+      <button class="big halt" id="haltBtn">HALT</button>
+      <button class="big kill" id="killBtn">⛔ KILL SWITCH - CASH OUT ALL</button>
+    </div>
+
+    <div class="panel">
+      <div class="cols">
+        <div>
+          <div class="label">Size mode</div>
+          <div class="row" id="size">
+            <button class="opt" data-v="1">$1</button><button class="opt" data-v="2">$2</button>
+            <button class="opt" data-v="5">$5</button><button class="opt" data-v="prop">PROP</button>
+          </div>
+          <div class="hint" id="propHint"></div>
+        </div>
+        <div>
+          <div class="label">Min his bet</div>
+          <div class="row" id="minbet">
+            <button class="opt" data-v="0">ALL</button><button class="opt" data-v="100">$100</button>
+            <button class="opt" data-v="1000">$1K</button>
+          </div>
+        </div>
+      </div>
+      <div class="cols" style="margin-top:14px">
+        <div><div class="label">Copy sells</div>
+          <div class="row" id="sells"><button class="opt" data-v="true">ON</button><button class="opt" data-v="false">OFF</button></div></div>
+        <div><div class="label">Polymarket US only</div>
+          <div class="row" id="usonly"><button class="opt" data-v="true">ON</button><button class="opt" data-v="false">OFF</button></div></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="label">Open positions // <span id="npos2">0</span></div>
+      <table>
+        <thead><tr><th>Side</th><th>Market</th><th class="n">In</th><th class="n">Now</th><th class="n">Cost</th><th class="n hide-sm">P&amp;L</th></tr></thead>
+        <tbody id="positions"></tbody>
+      </table>
+    </div>
+
+    <div class="panel">
+      <div class="label">Copy feed</div>
+      <div class="feed" id="feed"></div>
+      <div class="label" style="margin-top:14px">Skipped</div>
+      <div class="hint" id="skipped"></div>
+      <div class="label" style="margin-top:14px">Bot log</div>
+      <div class="feed" id="log"></div>
+    </div>
+  </section>
+
+  <!-- ===================== GO LIVE ===================== -->
+  <section id="tab-live" class="hidden">
+    <div class="panel warn">
+      <div class="label" style="color:var(--amber)">Real money</div>
+      Live trades go through <b>Polymarket US</b>, the version US residents can use. Only trades in markets that also exist on Polymarket US get copied; the dashboard's "on Polymarket US" line shows how many that is.
+      Your keys are encrypted in this browser and stored as GitHub Secrets. They are never saved in the repo, in this page, or on this phone.
+    </div>
+    <div class="panel">
+      <div class="label">Polymarket US key ID</div>
+      <input id="keyId" autocomplete="off" placeholder="from polymarket.us/developer">
+      <div class="label" style="margin-top:12px">Polymarket US secret key</div>
+      <input id="keySecret" type="password" autocomplete="off">
+      <button class="big lock" id="saveKeys">SAVE KEYS</button>
+      <div class="hint" id="keysStatus"></div>
+    </div>
+    <div class="panel">
+      <div class="cols">
+        <div><div class="label">Max per trade ($)</div><input id="maxTrade" inputmode="decimal"></div>
+        <div><div class="label">Max per day ($)</div><input id="dailyCap" inputmode="decimal"></div>
+      </div>
+      <button class="big halt" id="goLive">GO LIVE</button>
+      <button class="big lock" id="goPaper">BACK TO PAPER</button>
+      <div class="hint" id="liveStatus"></div>
+    </div>
+  </section>
+
+  <!-- ===================== SETUP ===================== -->
+  <section id="tab-setup" class="hidden">
+    <div class="panel">
+      <div class="label">GitHub repo</div>
+      <input id="repo" placeholder="owner/repo" autocapitalize="off" spellcheck="false">
+      <div class="label" style="margin-top:12px">GitHub access token</div>
+      <input id="token" type="password" autocomplete="off" placeholder="github_pat_…">
+      <button class="big lock" id="saveSetup">CONNECT</button>
+      <div class="hint" id="setupStatus"></div>
+      <div class="hint">The token lets this page change the bot's settings. It stays on this device only. Make a fine-grained token limited to this one repo with <b>Contents</b>, <b>Secrets</b> and <b>Actions</b> set to read and write.</div>
+    </div>
+    <div class="panel">
+      <div class="label">Paper account</div>
+      <div class="row" id="startBank">
+        <button class="opt" data-v="100">$100</button><button class="opt" data-v="500">$500</button>
+        <button class="opt" data-v="1000">$1K</button><button class="opt" data-v="5000">$5K</button>
+      </div>
+      <div class="label" style="margin-top:12px">PROP size (% of his bet)</div>
+      <input id="propPct" inputmode="decimal">
+      <button class="big kill" id="resetPaper">RESET PAPER ACCOUNT</button>
+      <button class="big lock" id="restartBot">RESTART BOT</button>
+    </div>
+  </section>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const usd = (x) => (x < 0 ? "-$" : "$") + Math.abs(x || 0).toFixed(2);
+const cents = (p) => (p * 100).toFixed(1) + "¢";
+const ago = (ts) => { const s = Math.max(0, Date.now() / 1000 - ts); return s < 90 ? Math.round(s) + "s" : s < 5400 ? Math.round(s / 60) + "m" : Math.round(s / 3600) + "h"; };
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+function toast(msg) { const t = $("toast"); t.textContent = msg; t.style.display = "block"; clearTimeout(t._h); t._h = setTimeout(() => (t.style.display = "none"), 4000); }
+function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } }
+
+// ---- repo + token -------------------------------------------------------
+function guessRepo() {
+  const m = location.hostname.match(/^([^.]+)\.github\.io$/);
+  const path = location.pathname.split("/").filter(Boolean)[0];
+  return m && path ? `${m[1]}/${path}` : "";
+}
+let REPO = store("repo") || guessRepo();
+let TOKEN = store("token") || "";
+const API = () => `https://api.github.com/repos/${REPO}`;
+const hdr = () => (TOKEN ? { Authorization: `Bearer ${TOKEN}`, Accept: "application/vnd.github+json" } : { Accept: "application/vnd.github+json" });
+
+async function readJson(path) {
+  if (!REPO) return [null, null];
+  if (TOKEN) {
+    const r = await fetch(`${API()}/contents/${path}?ref=data&t=${Date.now()}`, { headers: { ...hdr(), Accept: "application/vnd.github.raw" }, cache: "no-store" });
+    return r.ok ? [await r.json(), null] : [null, null];
+  }
+  const r = await fetch(`https://raw.githubusercontent.com/${REPO}/data/${path}?t=${Date.now()}`, { cache: "no-store" });
+  return r.ok ? [await r.json(), null] : [null, null];
+}
+
+let settings = null, settingsSha = null, state = null;
+
+async function saveSettings(patch, msg) {
+  if (!TOKEN) { toast("Connect your GitHub token in SETUP first"); showTab("setup"); return false; }
+  const [cur] = await readJson("settings.json");
+  const meta = await fetch(`${API()}/contents/settings.json?ref=data&t=${Date.now()}`, { headers: hdr(), cache: "no-store" });
+  const sha = meta.ok ? (await meta.json()).sha : null;
+  const next = { ...(cur || settings || {}), ...patch };
+  const body = { message: msg || "Update settings", branch: "data", content: btoa(unescape(encodeURIComponent(JSON.stringify(next, null, 1)))) };
+  if (sha) body.sha = sha;
+  const r = await fetch(`${API()}/contents/settings.json`, { method: "PUT", headers: hdr(), body: JSON.stringify(body) });
+  if (!r.ok) { toast("Save failed: " + r.status); return false; }
+  settings = next; settingsSha = (await r.json()).content.sha;
+  renderSettings();
+  toast("Saved. The bot picks this up within 30 seconds.");
+  return true;
+}
+
+// ---- rendering ----------------------------------------------------------
+function setOpts(rowId, value) {
+  document.querySelectorAll(`#${rowId} .opt`).forEach((b) => b.classList.toggle("on", String(b.dataset.v) === String(value)));
+}
+function renderSettings() {
+  if (!settings) return;
+  if (document.activeElement !== $("target")) $("target").value = settings.target_label || settings.target || "";
+  $("locked").textContent = `> locked: ${settings.target_label || ""} [${(settings.target || "").slice(0, 12)}…]`;
+  setOpts("size", settings.size_mode); setOpts("minbet", settings.min_his_bet); setOpts("sells", settings.copy_sells); setOpts("usonly", settings.us_only !== false);
+  setOpts("startBank", settings.paper_start_bank);
+  $("propHint").textContent = settings.size_mode === "prop" ? `PROP = ${settings.prop_pct}% of his dollar size` : "";
+  $("haltBtn").textContent = settings.halted ? "RESUME" : "HALT";
+  $("haltBtn").className = "big " + (settings.halted ? "resume" : "halt");
+  if (document.activeElement !== $("maxTrade")) $("maxTrade").value = settings.live_max_trade;
+  if (document.activeElement !== $("dailyCap")) $("dailyCap").value = settings.live_daily_cap;
+  if (document.activeElement !== $("propPct")) $("propPct").value = settings.prop_pct;
+  $("liveStatus").textContent = settings.mode === "live" ? "Live mode is ON." : "Paper mode. Nothing real is being bought.";
+}
+
+function renderState() {
+  if (!state) return;
+  const posVal = Object.values(state.positions).reduce((a, p) => a + p.shares * (p.cur ?? p.avg), 0);
+  const equity = state.bank + posVal;
+  const pnl = equity - state.start_bank;
+  $("bank").textContent = usd(state.bank);
+  $("exposure").textContent = usd(posVal);
+  $("pnl").textContent = usd(pnl); $("pnl").classList.toggle("neg", pnl < 0);
+  $("realized").textContent = usd(state.realized); $("realized").classList.toggle("neg", state.realized < 0);
+  const w = state.wins, l = state.losses;
+  $("wl").textContent = `${w} / ${l}` + (w + l ? ` (${Math.round((100 * w) / (w + l))}%)` : "");
+  const n = Object.keys(state.positions).length;
+  $("npos").textContent = n; $("npos2").textContent = n;
+  const live = state.mode === "live";
+  $("mode").textContent = live ? "LIVE" : "PAPER"; $("mode").classList.toggle("live", live);
+  const us = state.us || { checked: 0, available: 0 };
+  $("usline").textContent = us.checked ? `on Polymarket US: ${us.available} of ${us.checked} of his buys (${Math.round((100 * us.available) / us.checked)}%) · started ${new Date(state.started_at * 1000).toLocaleDateString()} with ${usd(state.start_bank)}` : `started with ${usd(state.start_bank)}`;
+
+  const alive = Date.now() / 1000 - state.heartbeat < 600;
+  $("hb").className = "dot " + (alive ? (settings && settings.halted ? "off" : "on") : "off");
+  $("hbtext").textContent = !alive ? `OFFLINE · last seen ${ago(state.heartbeat)} ago` : settings && settings.halted ? "HALTED" : `TRACKING · ${ago(state.heartbeat)} ago`;
+
+  const rows = Object.values(state.positions).sort((a, b) => b.cost - a.cost).slice(0, 300);
+  $("positions").innerHTML = rows.map((p) => {
+    const now = p.cur ?? p.avg, val = p.shares * now, pl = val - p.cost;
+    return `<tr><td>${esc(p.outcome)}</td><td>${esc(p.title)}${p.us === false ? ' <span class="muted">· not on US</span>' : ""}</td><td class="n">${cents(p.avg)}</td><td class="n">${cents(now)}</td><td class="n">${usd(p.cost)}</td><td class="n hide-sm ${pl >= 0 ? "up" : "down"}">${usd(pl)}</td></tr>`;
+  }).join("") || `<tr><td colspan="6" class="muted">No open positions yet</td></tr>`;
+
+  $("feed").innerHTML = state.trades.slice(0, 40).map((t) => {
+    const cls = t.side === "BUY" ? "" : (t.pnl >= 0 ? "up" : "down");
+    const extra = t.side === "BUY" ? ` · he paid ${cents(t.his_price || 0)} for ${usd(t.his_usd)} · ${t.delay}s late` : ` · P&L ${usd(t.pnl)}`;
+    return `<div class="${cls}"><span class="muted">${ago(t.ts)}</span> ${t.side} ${usd(t.usd)} ${esc(t.outcome)} @ ${cents(t.price)} · ${esc(t.title)}<span class="muted">${extra}</span></div>`;
+  }).join("") || '<div class="muted">Waiting for his next trade…</div>';
+  $("skipped").textContent = Object.entries(state.skipped || {}).map(([k, v]) => `${k}: ${v}`).join(" · ") || "none";
+  $("log").innerHTML = (state.log || []).slice(0, 12).map(([ts, m]) => `<div><span class="muted">${ago(ts)}</span> ${esc(m)}</div>`).join("");
+  const his = state.his || {};
+  const hp = his.pnl || {};
+  const sgn = (x) => (x === undefined ? "?" : usd(x));
+  $("hisline").textContent = his.since ? `> his record since we started copying: ${his.buys} buys · ${his.sells} sells · ${usd(his.usd)} traded · P&L ${sgn(hp.since_copy)}  |  today ${sgn(hp.day)} · month ${sgn(hp.month)} · all-time ${sgn(hp.all)}` : "";
+  drawEquity(state.equity || []);
+}
+
+function drawEquity(pts) {
+  const c = $("eq"), dpr = window.devicePixelRatio || 1, w = c.clientWidth, h = 120;
+  c.width = w * dpr; c.height = h * dpr; const g = c.getContext("2d"); g.scale(dpr, dpr); g.clearRect(0, 0, w, h);
+  if (pts.length < 2) return;
+  const ys = pts.map((p) => p[1]), lo = Math.min(...ys), hi = Math.max(...ys), span = hi - lo || 1;
+  const x = (i) => (i / (pts.length - 1)) * (w - 4) + 2, y = (v) => h - 8 - ((v - lo) / span) * (h - 20);
+  g.beginPath(); pts.forEach((p, i) => (i ? g.lineTo(x(i), y(p[1])) : g.moveTo(x(i), y(p[1]))));
+  g.strokeStyle = "#2ee6ff"; g.lineWidth = 2; g.shadowColor = "#2ee6ff"; g.shadowBlur = 8; g.stroke();
+  g.shadowBlur = 0; g.lineTo(x(pts.length - 1), h); g.lineTo(x(0), h); g.closePath();
+  const grad = g.createLinearGradient(0, 0, 0, h); grad.addColorStop(0, "rgba(46,230,255,.25)"); grad.addColorStop(1, "rgba(46,230,255,0)");
+  g.fillStyle = grad; g.fill();
+}
+
+async function refresh() {
+  if (!REPO) { $("hbtext").textContent = "SET UP IN SETUP TAB"; return; }
+  try {
+    const [s, sha] = await readJson("settings.json"); if (s) { settings = s; settingsSha = sha; renderSettings(); }
+    const mode = settings && settings.mode === "live" ? "live" : "paper";
+    let [st] = await readJson(`state-${mode}.json`);
+    if (!st && mode === "live") [st] = await readJson("state-paper.json");
+    if (st) { state = st; renderState(); }
+  } catch (e) { $("hbtext").textContent = "CAN'T REACH GITHUB"; }
+}
+
+// ---- controls -----------------------------------------------------------
+function showTab(name) {
+  document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
+  ["dash", "live", "setup"].forEach((n) => $("tab-" + n).classList.toggle("hidden", n !== name));
+}
+document.querySelectorAll(".tab").forEach((t) => (t.onclick = () => showTab(t.dataset.tab)));
+document.querySelectorAll("#size .opt").forEach((b) => (b.onclick = () => saveSettings({ size_mode: b.dataset.v }, `Size ${b.dataset.v}`)));
+document.querySelectorAll("#minbet .opt").forEach((b) => (b.onclick = () => saveSettings({ min_his_bet: Number(b.dataset.v) }, `Min bet ${b.dataset.v}`)));
+document.querySelectorAll("#sells .opt").forEach((b) => (b.onclick = () => saveSettings({ copy_sells: b.dataset.v === "true" }, "Copy sells")));
+document.querySelectorAll("#usonly .opt").forEach((b) => (b.onclick = () => saveSettings({ us_only: b.dataset.v === "true" }, "US only")));
+document.querySelectorAll("#startBank .opt").forEach((b) => (b.onclick = () => saveSettings({ paper_start_bank: Number(b.dataset.v) }, "Paper bank")));
+$("haltBtn").onclick = () => saveSettings({ halted: !(settings && settings.halted) }, settings && settings.halted ? "Resume" : "Halt");
+$("killBtn").onclick = () => { if (confirm("Sell every open position now and halt the bot?")) saveSettings({ kill: true }, "Kill switch"); };
+$("resetPaper").onclick = () => { if (confirm("Wipe the paper account and start over?")) saveSettings({ reset_paper: true }, "Reset paper"); };
+$("propPct").onchange = () => saveSettings({ prop_pct: Number($("propPct").value) || 1 }, "Prop %");
+$("maxTrade").onchange = () => saveSettings({ live_max_trade: Number($("maxTrade").value) || 1 }, "Live max trade");
+$("dailyCap").onchange = () => saveSettings({ live_daily_cap: Number($("dailyCap").value) || 10 }, "Live daily cap");
+
+async function resolveTarget(text) {
+  text = text.trim().replace(/^@/, "");
+  if (/^0x[0-9a-fA-F]{40}$/.test(text)) return [text.toLowerCase(), text.slice(0, 8)];
+  try {
+    const r = await fetch(`https://gamma-api.polymarket.com/public-search?q=${encodeURIComponent(text)}&search_profiles=true&limit_per_type=10`);
+    const j = await r.json();
+    const p = (j.profiles || []).find((x) => (x.name || "").toLowerCase() === text.toLowerCase());
+    if (p && p.proxyWallet) return [p.proxyWallet.toLowerCase(), p.name];
+  } catch (e) {}
+  return [null, null];
+}
+$("lockBtn").onclick = async () => {
+  const [wallet, label] = await resolveTarget($("target").value);
+  if (!wallet) { toast("Couldn't find that trader. Paste their 0x wallet instead."); return; }
+  if (confirm(`Copy ${label} (${wallet.slice(0, 10)}…) from now on?`)) saveSettings({ target: wallet, target_label: label }, `Target ${label}`);
+};
+
+async function putSecret(name, value) {
+  const k = await (await fetch(`${API()}/actions/secrets/public-key`, { headers: hdr() })).json();
+  const pk = Uint8Array.from(atob(k.key), (c) => c.charCodeAt(0));
+  const sealed = window.sealBox(new TextEncoder().encode(value), pk);
+  const encrypted_value = btoa(String.fromCharCode(...sealed));
+  const r = await fetch(`${API()}/actions/secrets/${name}`, { method: "PUT", headers: hdr(), body: JSON.stringify({ encrypted_value, key_id: k.key_id }) });
+  if (!r.ok) throw new Error(`${name}: ${r.status}`);
+}
+$("saveKeys").onclick = async () => {
+  if (!TOKEN) { toast("Connect your GitHub token in SETUP first"); return showTab("setup"); }
+  const id = $("keyId").value.trim(), sec = $("keySecret").value.trim();
+  if (!id || !sec) return toast("Enter both keys");
+  try {
+    await putSecret("POLYMARKET_KEY_ID", id); await putSecret("POLYMARKET_SECRET_KEY", sec);
+    $("keyId").value = ""; $("keySecret").value = "";
+    $("keysStatus").textContent = "Keys saved as GitHub Secrets. Press RESTART BOT in SETUP so the bot loads them.";
+  } catch (e) { $("keysStatus").textContent = "Saving keys failed (" + e.message + "). Check the token has Secrets: read and write."; }
+};
+$("goLive").onclick = async () => {
+  const typed = prompt(`Real money. Max ${usd(settings.live_max_trade)} per trade, ${usd(settings.live_daily_cap)} per day. Type LIVE to confirm.`);
+  if (typed === "LIVE" && (await saveSettings({ mode: "live", halted: false }, "Go live"))) restartBot();
+};
+$("goPaper").onclick = () => saveSettings({ mode: "paper" }, "Back to paper");
+
+async function restartBot() {
+  const r = await fetch(`${API()}/actions/workflows/bot.yml/runs?status=in_progress`, { headers: hdr() });
+  for (const run of (await r.json()).workflow_runs || []) await fetch(`${API()}/actions/runs/${run.id}/cancel`, { method: "POST", headers: hdr() });
+  const d = await fetch(`${API()}/actions/workflows/bot.yml/dispatches`, { method: "POST", headers: hdr(), body: JSON.stringify({ ref: "main" }) });
+  toast(d.ok ? "Bot restarting. Give it a minute." : "Restart failed: " + d.status);
+}
+$("restartBot").onclick = () => (TOKEN ? restartBot() : toast("Connect your GitHub token first"));
+$("saveSetup").onclick = async () => {
+  REPO = $("repo").value.trim(); TOKEN = $("token").value.trim();
+  store("repo", REPO); store("token", TOKEN);
+  const r = await fetch(API(), { headers: hdr() });
+  $("setupStatus").textContent = r.ok ? "Connected." : `Couldn't open ${REPO} with that token (${r.status}).`;
+  refresh();
+};
+$("repo").value = REPO; $("token").value = TOKEN ? "••••••••" : "";
+$("token").onfocus = () => { if ($("token").value.startsWith("•")) $("token").value = ""; };
+
+// ---- background rain ----------------------------------------------------
+(function rain() {
+  const c = $("rain"), g = c.getContext("2d"); let cols, drops;
+  const chars = "0123456789ABCDEFアイウエオカキクケコサシスセソ";
+  function size() { c.width = innerWidth; c.height = innerHeight; cols = Math.floor(c.width / 18); drops = Array(cols).fill(0).map(() => Math.random() * -50); }
+  size(); addEventListener("resize", size);
+  setInterval(() => {
+    g.fillStyle = "rgba(2,6,15,.18)"; g.fillRect(0, 0, c.width, c.height);
+    g.fillStyle = "#2e8bff"; g.font = "15px Share Tech Mono, monospace";
+    drops.forEach((d, i) => { g.fillText(chars[(Math.random() * chars.length) | 0], i * 18, d * 18); drops[i] = d * 18 > c.height && Math.random() > 0.975 ? 0 : d + 1; });
+  }, 70);
+})();
+
+refresh();
+setInterval(refresh, TOKEN ? 20000 : 60000);
+</script>
+</body>
+</html>
