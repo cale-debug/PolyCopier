@@ -20,7 +20,9 @@ from .portfolio import (DEFAULT_SETTINGS, bet_size, buy, exposure, log, mark, ne
 from .store import LocalStore, Store
 
 POLL = int(os.environ.get("POLL_SECONDS", "10"))
-SAVE_EVERY = int(os.environ.get("SAVE_SECONDS", "120"))
+SAVE_EVERY = int(os.environ.get("SAVE_SECONDS", "15"))         # publish changes this often
+UPKEEP_EVERY = int(os.environ.get("UPKEEP_SECONDS", "120"))    # re-price open positions
+HEARTBEAT_EVERY = int(os.environ.get("HEARTBEAT_SECONDS", "300"))
 UPKEEP_BATCH = int(os.environ.get("UPKEEP_BATCH", "150"))
 MAX_POSITIONS = int(os.environ.get("MAX_POSITIONS", "1500"))
 RUN_SECONDS = int(float(os.environ.get("RUN_MINUTES") or 340) * 60)
@@ -274,17 +276,22 @@ class Bot:
 
     def run(self) -> None:
         start = time.time()
-        last_save = last_settings = 0.0
+        last_save = last_settings = last_upkeep = 0.0
         log(self.state, f"Runner started ({self.mode})")
         while time.time() - start < RUN_SECONDS:
             now = time.time()
             try:
-                if now - last_settings > 30:
+                if now - last_settings > 15:
                     self.refresh_settings()
                     last_settings = now
                 self.poll()
-                if now - last_save > SAVE_EVERY:
+                if now - last_upkeep > UPKEEP_EVERY:
                     self.upkeep()
+                    last_upkeep = now
+                    self.dirty = True
+                # Save only when something changed (plus a slow heartbeat), so viewers
+                # can poll every 15s without burning through GitHub's rate limit.
+                if (self.dirty and now - last_save > SAVE_EVERY) or now - last_save > HEARTBEAT_EVERY:
                     self.save()
                     last_save = now
             except Exception as exc:  # keep running through API hiccups

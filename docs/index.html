@@ -60,6 +60,9 @@ td.n, th.n { text-align: right; white-space: nowrap; }
 .feed div { padding: 6px 0; border-bottom: 1px solid rgba(14, 58, 107, .5); font-size: 14px; }
 canvas#eq { width: 100%; height: 120px; display: block; }
 .hidden { display: none; }
+body.viewonly #lockBtn, body.viewonly #haltBtn, body.viewonly #killBtn, body.viewonly [data-tab="live"] { display: none; }
+body.viewonly .opt { pointer-events: none; }
+body.viewonly #target { pointer-events: none; }
 .warn { border-color: var(--amber); color: var(--amber); }
 ol { padding-left: 20px; line-height: 1.6; } a { color: var(--neon); }
 .toast { position: fixed; left: 16px; right: 16px; bottom: 20px; z-index: 5; max-width: 600px; margin: auto; padding: 12px 14px; background: #031428; border: 1px solid var(--neon); border-radius: 6px; display: none; }
@@ -77,7 +80,7 @@ ol { padding-left: 20px; line-height: 1.6; } a { color: var(--neon); }
 <canvas id="rain"></canvas>
 <main>
   <h1>PolyCopier</h1>
-  <div class="sub">watcher // live copy <span class="dot" id="hb"></span><span id="hbtext">CONNECTING</span></div>
+  <div class="sub"><span id="viewonly" class="muted"></span>watcher // live copy <span class="dot" id="hb"></span><span id="hbtext">CONNECTING</span></div>
 
   <div class="tabs">
     <button class="tab active" data-tab="dash">DASH</button>
@@ -231,14 +234,27 @@ let TOKEN = store("token") || "";
 const API = () => `https://api.github.com/repos/${REPO}`;
 const hdr = () => (TOKEN ? { Authorization: `Bearer ${TOKEN}`, Accept: "application/vnd.github+json" } : { Accept: "application/vnd.github+json" });
 
+const etags = {}, cached = {};
+let delayed = false;
 async function readJson(path) {
   if (!REPO) return [null, null];
-  if (TOKEN) {
-    const r = await fetch(`${API()}/contents/${path}?ref=data&t=${Date.now()}`, { headers: { ...hdr(), Accept: "application/vnd.github.raw" }, cache: "no-store" });
-    return r.ok ? [await r.json(), null] : [null, null];
-  }
-  const r = await fetch(`https://raw.githubusercontent.com/${REPO}/data/${path}?t=${Date.now()}`, { cache: "no-store" });
-  return r.ok ? [await r.json(), null] : [null, null];
+  // GitHub API with ETags: unchanged files come back 304, which doesn't count against
+  // the rate limit, so viewers without a token can poll every 15 seconds.
+  const h = { ...hdr(), Accept: "application/vnd.github.raw" };
+  if (etags[path]) h["If-None-Match"] = etags[path];
+  try {
+    const r = await fetch(`${API()}/contents/${path}?ref=data`, { headers: h, cache: "no-store" });
+    if (r.status === 304) { delayed = false; return [cached[path], null]; }
+    if (r.ok) {
+      etags[path] = r.headers.get("ETag"); cached[path] = await r.json(); delayed = false;
+      return [cached[path], null];
+    }
+    if (r.status === 404) return [null, null];
+  } catch (e) {}
+  // Rate limited: fall back to the raw file, which GitHub caches for up to 5 minutes.
+  delayed = true;
+  const r = await fetch(`https://raw.githubusercontent.com/${REPO}/data/${path}`, { cache: "no-store" });
+  return r.ok ? [await r.json(), null] : [cached[path] || null, null];
 }
 
 let settings = null, settingsSha = null, state = null;
@@ -300,7 +316,7 @@ function renderState() {
 
   const alive = Date.now() / 1000 - state.heartbeat < 600;
   $("hb").className = "dot " + (alive ? (settings && settings.halted ? "off" : "on") : "off");
-  $("hbtext").textContent = !alive ? `OFFLINE · last seen ${ago(state.heartbeat)} ago` : settings && settings.halted ? "HALTED" : `TRACKING · ${ago(state.heartbeat)} ago`;
+  $("hbtext").textContent = (delayed ? "UP TO 5 MIN DELAYED · " : "") + (!alive ? `OFFLINE · last seen ${ago(state.heartbeat)} ago` : settings && settings.halted ? "HALTED" : `TRACKING · updated ${ago(state.heartbeat)} ago`);
 
   const rows = Object.values(state.positions).sort((a, b) => b.cost - a.cost).slice(0, 300);
   $("positions").innerHTML = rows.map((p) => {
@@ -438,7 +454,9 @@ $("token").onfocus = () => { if ($("token").value.startsWith("•")) $("token").
 })();
 
 refresh();
-setInterval(refresh, TOKEN ? 20000 : 60000);
+setInterval(refresh, 15000);
+document.body.classList.toggle("viewonly", !TOKEN);
+if (!TOKEN) $("viewonly").textContent = "view only · ";
 </script>
 </body>
 </html>
