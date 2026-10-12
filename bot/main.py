@@ -16,10 +16,10 @@ from typing import Optional
 
 from . import live_us, polymarket as pm
 from .portfolio import (DEFAULT_SETTINGS, bet_size, buy, exposure, log, mark, new_state,
-                        sell, should_copy_buy, skip)
+                        sell, should_copy_buy, skip, slip_ok, track_slip)
 from .store import LocalStore, Store
 
-POLL = int(os.environ.get("POLL_SECONDS", "10"))
+POLL = float(os.environ.get("POLL_SECONDS", "3"))
 SAVE_EVERY = int(os.environ.get("SAVE_SECONDS", "15"))         # publish changes this often
 UPKEEP_EVERY = int(os.environ.get("UPKEEP_SECONDS", "120"))    # re-price open positions
 HEARTBEAT_EVERY = int(os.environ.get("HEARTBEAT_SECONDS", "300"))
@@ -164,17 +164,24 @@ class Bot:
                 return skip(self.state, "drawdown limit")
             if exposure(self.state) + usd > equity * float(self.settings.get("max_exposure_pct", 50)) / 100:
                 return skip(self.state, "exposure limit")
-            if self.mode == "live":
-                return self.live_buy(t, usd, us_slug, delay)
-            _, ask = pm.best_prices(asset)
+            long = live_us.is_long(us_slug, t.get("outcome"), t.get("outcomeIndex")) if us_slug else True
+            his_price = float(t.get("price") or 0)
+            # Price off the book we'd really trade on: Polymarket US when the market is there.
+            _, ask = live_us.quote(us_slug, long) if us_slug else pm.best_prices(asset)
             if ask is None:
                 return skip(self.state, "no sellers")
+            if not slip_ok(self.settings, his_price, ask):
+                self.state.setdefault("slip", {"n": 0, "cents": 0.0, "skipped": 0})["skipped"] += 1
+                return skip(self.state, "price moved past slippage cap")
+            if self.mode == "live":
+                return self.live_buy(t, usd, us_slug, long, ask, delay)
             fill = buy(self.state, t, usd, ask, delay)
             if fill:
-                self.state["positions"][asset]["us"] = on_us
-                self.state["positions"][asset]["us_slug"] = us_slug
+                track_slip(self.state, his_price, ask)
+                pos = self.state["positions"][asset]
+                pos.update(us=on_us, us_slug=us_slug, long=long)
                 L.info("BUY  $%.2f %s %s @ %.3f (he paid %.3f, %ds late)", usd, t.get("outcome"),
-                       t.get("title"), ask, float(t.get("price") or 0), delay)
+                       t.get("title"), ask, his_price, delay)
         elif side == "SELL":
             if not self.settings.get("copy_sells") or self.settings.get("halted"):
                 return
@@ -185,14 +192,21 @@ class Bot:
             fraction = sold / (sold + left) if sold + left > 0 else 1.0
             if self.mode == "live":
                 return self.live_sell(asset, fraction)
-            bid, _ = pm.best_prices(asset)
+            bid, _ = self.quote(asset)
             if bid is None:
                 return skip(self.state, "no buyers")
             sell(self.state, asset, fraction, bid, "copied sell")
             L.info("SELL %.0f%% of %s @ %.3f", fraction * 100, t.get("title"), bid)
 
     # ---------------------------------------------------------------- live --
-    def live_buy(self, t: dict, usd: float, us_slug: Optional[str], delay: int) -> None:
+    def quote(self, asset: str):
+        """(bid, ask) for a position we hold, from the book it trades on."""
+        pos = self.state["positions"].get(asset) or {}
+        if pos.get("us_slug"):
+            return live_us.quote(pos["us_slug"], pos.get("long", True))
+        return pm.best_prices(asset)
+
+    def live_buy(self, t: dict, usd: float, us_slug: Optional[str], long: bool, ask: float, delay: int) -> None:
         if not us_slug:
             return skip(self.state, "not on Polymarket US")
         day = time.strftime("%Y-%m-%d", time.gmtime())
@@ -202,26 +216,34 @@ class Bot:
         usd = min(usd, float(self.settings["live_max_trade"]))
         if spent["usd"] + usd > float(self.settings["live_daily_cap"]):
             return skip(self.state, "daily cap reached")
+        his_price = float(t["price"])
+        cap = self.settings.get("max_slip_cents")
+        # The limit is the most we'll pay: his price plus the slippage cap. IOC means
+        # anything that can't fill at that price or better is cancelled, never chased.
+        limit = his_price + float(cap) / 100 if cap is not None and float(cap) >= 0 else ask
+        limit = min(0.99, max(limit, 0.01))
         try:
-            resp = live_us.place(us_slug, int(t.get("outcomeIndex") or 0), "BUY", usd, float(t["price"]))
+            resp = live_us.place(us_slug, long, "BUY", usd / limit, limit)
         except Exception as exc:
             log(self.state, f"Order failed: {exc}")
             return skip(self.state, "order error")
         shares, px = live_us.filled(resp)
         if shares <= 0:
             return skip(self.state, "not filled")
+        track_slip(self.state, his_price, px)
         spent["usd"] += shares * px
         self.state["bank"] += shares * px  # buy() takes it back out
         buy(self.state, t, shares * px, px, delay)
-        pos = self.state["positions"][str(t["asset"])]
-        pos["outcome_index"] = int(t.get("outcomeIndex") or 0)
-        pos["us_slug"] = us_slug
+        self.state["positions"][str(t["asset"])].update(us=True, us_slug=us_slug, long=long)
 
     def live_sell(self, asset: str, fraction: float, why: str = "copied sell") -> None:
         pos = self.state["positions"][asset]
-        bid, _ = pm.best_prices(asset)
+        if not pos.get("us_slug"):
+            return skip(self.state, "not on Polymarket US")
+        bid, _ = live_us.quote(pos["us_slug"], pos.get("long", True))
+        limit = max(0.01, (bid or pos.get("cur", 0.5)) - 0.02)
         try:
-            resp = live_us.sell_qty(pos.get("us_slug") or pos["slug"], pos.get("outcome_index", 0), pos["shares"] * fraction, bid or pos.get("cur", 0.5))
+            resp = live_us.place(pos["us_slug"], pos.get("long", True), "SELL", pos["shares"] * fraction, limit)
         except Exception as exc:
             log(self.state, f"Sell failed: {exc}")
             return skip(self.state, "order error")
@@ -243,7 +265,7 @@ class Bot:
             if self.mode == "live":
                 self.live_sell(asset, 1.0, "kill switch")
                 continue
-            bid, _ = pm.best_prices(asset)
+            bid, _ = self.quote(asset)
             sell(self.state, asset, 1.0, bid if bid is not None else 0.0, "kill switch")
         self.save("Kill switch")
 

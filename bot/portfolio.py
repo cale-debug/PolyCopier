@@ -23,6 +23,7 @@ DEFAULT_SETTINGS = {
     "once_per_market": False,  # True: copy his first buy of an outcome, not every fill after it
     "skip_both_sides": False,  # True: don't buy the other side of a market we already hold
     "copy_sells": True,
+    "max_slip_cents": 1.0,     # skip a buy if we'd pay more than this many cents above his price
     "halted": False,
     "kill": False,             # one-shot: sell everything, then halt
     "mode": "paper",           # "paper" | "live"
@@ -53,6 +54,7 @@ def new_state(bank: float) -> dict:
         "heartbeat": 0,
         "live_spent_today": {"day": "", "usd": 0.0},
         "log": [],
+        "slip": {"n": 0, "cents": 0.0, "skipped": 0},  # our buy price vs his, in cents
     }
 
 
@@ -73,6 +75,20 @@ def should_copy_buy(settings: dict, his_usd: float) -> Optional[str]:
     if his_usd < float(settings.get("min_his_bet", 0) or 0):
         return "below min bet"
     return None
+
+
+def slip_ok(settings: dict, his_price: float, our_price: float) -> bool:
+    """True if paying `our_price` is within the slippage cap over his price."""
+    cap = settings.get("max_slip_cents")
+    if cap is None or float(cap) < 0:  # -1 means no cap
+        return True
+    return our_price <= his_price + float(cap) / 100 + 1e-9
+
+
+def track_slip(state: dict, his_price: float, our_price: float) -> None:
+    sl = state.setdefault("slip", {"n": 0, "cents": 0.0, "skipped": 0})
+    sl["n"] += 1
+    sl["cents"] = round(sl["cents"] + (our_price - his_price) * 100, 3)
 
 
 def skip(state: dict, reason: str) -> None:

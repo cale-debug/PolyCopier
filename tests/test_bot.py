@@ -8,6 +8,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bot import live_us, main, polymarket as pm  # noqa: E402
 from bot.portfolio import DEFAULT_SETTINGS, bet_size, buy, new_state, sell, should_copy_buy  # noqa: E402
 from bot.store import LocalStore  # noqa: E402
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def offline_us_book(monkeypatch):
+    # Tests price US markets off the same fake book as international ones, and allow
+    # the 2-cent gap between his 0.40 and the 0.42 ask unless a test says otherwise.
+    monkeypatch.setattr(live_us, "quote", lambda slug, long: pm.best_prices(slug))
+    monkeypatch.setattr(live_us, "_sides", lambda slug: ())
+    monkeypatch.setitem(DEFAULT_SETTINGS, "max_slip_cents", 5.0)
 
 TRADE = {"asset": "A", "title": "Will X?", "outcome": "Yes", "slug": "will-x", "price": 0.40,
          "usdcSize": 400, "size": 1000, "side": "BUY", "timestamp": 100, "transactionHash": "0x1"}
@@ -145,3 +155,27 @@ def test_exposure_and_drawdown_limits(tmp_path, monkeypatch):
         p["cur"] = 0.01                                  # both bets collapse
     bot.copy(dict(TRADE, asset="Z", conditionId="mz"), 1)
     assert bot.settings["halted"] is True and store.read("settings.json")[0]["halted"] is True
+
+
+def test_slippage_cap_skips_buys_priced_past_his(tmp_path, monkeypatch):
+    monkeypatch.setattr(live_us, "us_market", lambda slug, event="": "atc-" + slug)
+    asks = {"atc-a": 0.405, "atc-b": 0.43}
+    monkeypatch.setattr(pm, "best_prices", lambda key: (0.38, asks.get(key, 0.5)))
+    bot = main.Bot(LocalStore(str(tmp_path)))
+    bot.settings["max_slip_cents"] = 1.0
+    bot.copy(dict(TRADE, asset="A", slug="a"), 2)    # 0.5c above his 0.40: copied
+    bot.copy(dict(TRADE, asset="B", slug="b"), 2)    # 3c above: skipped
+    assert list(bot.state["positions"]) == ["A"]
+    assert bot.state["skipped"] == {"price moved past slippage cap": 1}
+    assert bot.state["slip"]["n"] == 1 and bot.state["slip"]["skipped"] == 1
+    assert abs(bot.state["slip"]["cents"] - 0.5) < 1e-6
+    assert bot.state["positions"]["A"]["us_slug"] == "atc-a"
+
+
+def test_us_side_matching(monkeypatch):
+    monkeypatch.setattr(live_us, "_sides", lambda slug: ((("eagles", "philadelphia eagles"), True),
+                                                       (("packers", "green bay packers"), False)))
+    assert live_us.is_long("aec-x", "Packers", 0) is False
+    assert live_us.is_long("aec-x", "Eagles", 1) is True
+    assert live_us.is_long("aec-x", "No", 0) is False
+    assert live_us.is_long("aec-x", "Yes", 1) is True

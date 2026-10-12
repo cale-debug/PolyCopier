@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import os
 from functools import lru_cache
-from typing import Optional
+from typing import Optional, Tuple
 
 import requests
 
@@ -64,22 +64,72 @@ def _client():
     return PolymarketUS(key_id=os.environ["POLYMARKET_KEY_ID"], secret_key=os.environ["POLYMARKET_SECRET_KEY"])
 
 
-def _side(outcome_index: int) -> str:
-    # Polymarket US markets are binary: the first outcome is the long (YES) side.
-    return "OUTCOME_SIDE_YES" if int(outcome_index or 0) == 0 else "OUTCOME_SIDE_NO"
+@lru_cache(maxsize=2000)
+def _sides(us_slug: str) -> tuple:
+    """((name, is_long), ...) for each side of a Polymarket US market."""
+    try:
+        r = requests.get(f"{GATEWAY}/v1/market/slug/{us_slug}", timeout=15)
+        m = (r.json() or {}).get("market") or {} if r.ok else {}
+    except (requests.RequestException, ValueError):
+        return ()
+    out = []
+    for side in m.get("marketSides") or []:
+        names = {str(side.get("description") or "").lower(), str((side.get("team") or {}).get("name") or "").lower()}
+        out.append((tuple(n for n in names if n), bool(side.get("long"))))
+    return tuple(out)
 
 
-def place(slug: str, outcome_index: int, action: str, usd: float, price: float) -> dict:
-    """Immediate-or-cancel limit order, at most 2 cents worse than `price`."""
-    limit = min(0.99, price + 0.02) if action == "BUY" else max(0.01, price - 0.02)
-    qty = round(usd / limit, 2)
+def is_long(us_slug: str, outcome: str, outcome_index: int) -> bool:
+    """Whether the international outcome we copy is the long (YES) side on Polymarket US.
+
+    US markets are one long and one short side, and their order doesn't always match
+    the international outcome order, so match on the outcome's name first.
+    """
+    name = str(outcome or "").strip().lower()
+    if name in ("yes", "no"):
+        return name == "yes"
+    for names, long in _sides(us_slug):
+        if any(name and (name == n or name in n or n in name) for n in names):
+            return long
+    return int(outcome_index or 0) == 0
+
+
+def quote(us_slug: str, long: bool) -> Tuple[Optional[float], Optional[float]]:
+    """(best bid, best ask) for one side of a Polymarket US market, from the public gateway.
+
+    The book is quoted for the long side; the short side is its mirror image
+    (buying NO at 1 - the best YES bid).
+    """
+    try:
+        r = requests.get(f"{GATEWAY}/v1/markets/{us_slug}/bbo", timeout=10)
+        d = (r.json() or {}).get("marketData") or {} if r.ok else {}
+    except (requests.RequestException, ValueError):
+        return None, None
+    if d.get("state") not in (None, "MARKET_STATE_OPEN"):
+        return None, None
+
+    def px(key):
+        try:
+            v = float((d.get(key) or {}).get("value"))
+        except (TypeError, ValueError):
+            return None
+        return v if 0 < v < 1 else None
+
+    bid, ask = px("bestBid"), px("bestAsk")
+    if long:
+        return bid, ask
+    return (round(1 - ask, 4) if ask else None), (round(1 - bid, 4) if bid else None)
+
+
+def place(slug: str, long: bool, action: str, qty: float, limit: float) -> dict:
+    """Immediate-or-cancel limit order: fills at `limit` or better, or not at all."""
     order = {
         "marketSlug": slug,
         "type": "ORDER_TYPE_LIMIT",
-        "outcomeSide": _side(outcome_index),
+        "outcomeSide": "OUTCOME_SIDE_YES" if long else "OUTCOME_SIDE_NO",
         "action": "ORDER_ACTION_BUY" if action == "BUY" else "ORDER_ACTION_SELL",
         "price": {"value": f"{limit:.3f}", "currency": "USD"},
-        "quantity": qty,
+        "quantity": round(qty, 2),
         "tif": "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
         "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_AUTOMATIC",
         "synchronousExecution": True,
@@ -90,10 +140,6 @@ def place(slug: str, outcome_index: int, action: str, usd: float, price: float) 
         return client.orders.create(order)
     finally:
         client.close()
-
-
-def sell_qty(slug: str, outcome_index: int, shares: float, price: float) -> dict:
-    return place(slug, outcome_index, "SELL", shares * max(price - 0.02, 0.01), price)
 
 
 def filled(resp: dict) -> tuple:
