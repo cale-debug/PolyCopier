@@ -1,0 +1,22 @@
+name: Scan leaderboard
+on:
+  workflow_dispatch:
+    inputs:
+      pool:
+        description: How many traders to pull from each leaderboard
+        default: "150"
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests
+      - run: python -u tools/scan_leaderboard.py --pool "${{ inputs.pool }}" | tee scan.md | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: scan
+          path: scan.md

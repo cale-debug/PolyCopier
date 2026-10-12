@@ -122,6 +122,7 @@ def test_once_per_market_and_both_sides(tmp_path, monkeypatch):
     monkeypatch.setattr(pm, "best_prices", lambda a: (0.38, 0.42))
     monkeypatch.setattr(live_us, "us_market", lambda slug, event="": "atc-" + slug)
     bot = main.Bot(LocalStore(str(tmp_path)))
+    bot.settings.update(once_per_market=True, skip_both_sides=True)
     t = dict(TRADE, conditionId="m1")
     bot.copy(t, 1)
     bot.copy(t, 1)                                  # another fill of the same buy
