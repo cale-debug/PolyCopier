@@ -55,7 +55,7 @@ def test_loop_copies_buys_and_sells(tmp_path, monkeypatch):
     monkeypatch.setattr(pm, "new_trades", fake.new_trades)
     monkeypatch.setattr(pm, "best_prices", lambda a: (0.38, 0.42))
     monkeypatch.setattr(pm, "his_position_shares", lambda w, a: 500.0)
-    monkeypatch.setattr(live_us, "us_market", lambda slug: {"slug": slug} if slug == "will-x" else None)
+    monkeypatch.setattr(live_us, "us_market", lambda slug, event="": "atc-" + slug if slug == "will-x" else None)
     store = LocalStore(str(tmp_path))
     bot = main.Bot(store)
     bot.poll()                                   # first poll pins the cursor to "now"
@@ -100,10 +100,19 @@ def test_order_fill_parsing():
 
 def test_us_only_skips_markets_missing_on_polymarket_us(tmp_path, monkeypatch):
     monkeypatch.setattr(pm, "best_prices", lambda a: (0.38, 0.42))
-    monkeypatch.setattr(live_us, "us_market", lambda slug: None)
+    monkeypatch.setattr(live_us, "us_market", lambda slug, event="": None)
     bot = main.Bot(LocalStore(str(tmp_path)))
     bot.copy(dict(TRADE), 5)
     assert bot.state["positions"] == {} and bot.state["skipped"] == {"not on Polymarket US": 1}
     bot.settings["us_only"] = False
     bot.copy(dict(TRADE), 5)
     assert "A" in bot.state["positions"]
+
+
+def test_us_market_matches_prefixed_slug_in_same_event(monkeypatch):
+    live_us._us_event.cache_clear()
+    monkeypatch.setattr(live_us, "_us_event", lambda ev: ("atc-epl-cov-new-2026-10-12-cov", "atc-epl-cov-new-2026-10-12-draw")
+                        if ev == "epl-cov-new-2026-10-12" else ())
+    assert live_us.us_market("epl-cov-new-2026-10-12-cov", "epl-cov-new-2026-10-12") == "atc-epl-cov-new-2026-10-12-cov"
+    assert live_us.us_market("epl-cov-new-2026-10-12-total-3pt5", "epl-cov-new-2026-10-12") is None
+    assert live_us.us_market("x", "other-event") is None

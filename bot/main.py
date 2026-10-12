@@ -12,6 +12,7 @@ import argparse
 import logging
 import os
 import time
+from typing import Optional
 
 from . import live_us, polymarket as pm
 from .portfolio import (DEFAULT_SETTINGS, bet_size, buy, exposure, log, mark, new_state,
@@ -135,8 +136,8 @@ class Bot:
         side = str(t.get("side")).upper()
         asset = str(t.get("asset"))
         his_usd = float(t.get("usdcSize") or 0) or float(t.get("size") or 0) * float(t.get("price") or 0)
-        slug = t.get("slug") or ""
-        on_us = live_us.us_market(slug) is not None
+        us_slug = live_us.us_market(t.get("slug") or "", t.get("eventSlug") or "")
+        on_us = us_slug is not None
         if side == "BUY":
             self.state["us"]["checked"] += 1
             self.state["us"]["available"] += on_us
@@ -150,13 +151,14 @@ class Bot:
                 return skip(self.state, "too many open positions")
             usd = bet_size(self.settings, his_usd)
             if self.mode == "live":
-                return self.live_buy(t, usd, on_us, delay)
+                return self.live_buy(t, usd, us_slug, delay)
             _, ask = pm.best_prices(asset)
             if ask is None:
                 return skip(self.state, "no sellers")
             fill = buy(self.state, t, usd, ask, delay)
             if fill:
                 self.state["positions"][asset]["us"] = on_us
+                self.state["positions"][asset]["us_slug"] = us_slug
                 L.info("BUY  $%.2f %s %s @ %.3f (he paid %.3f, %ds late)", usd, t.get("outcome"),
                        t.get("title"), ask, float(t.get("price") or 0), delay)
         elif side == "SELL":
@@ -176,8 +178,8 @@ class Bot:
             L.info("SELL %.0f%% of %s @ %.3f", fraction * 100, t.get("title"), bid)
 
     # ---------------------------------------------------------------- live --
-    def live_buy(self, t: dict, usd: float, on_us: bool, delay: int) -> None:
-        if not on_us:
+    def live_buy(self, t: dict, usd: float, us_slug: Optional[str], delay: int) -> None:
+        if not us_slug:
             return skip(self.state, "not on Polymarket US")
         day = time.strftime("%Y-%m-%d", time.gmtime())
         spent = self.state["live_spent_today"]
@@ -187,7 +189,7 @@ class Bot:
         if spent["usd"] + usd > float(self.settings["live_daily_cap"]):
             return skip(self.state, "daily cap reached")
         try:
-            resp = live_us.place(t["slug"], int(t.get("outcomeIndex") or 0), "BUY", usd, float(t["price"]))
+            resp = live_us.place(us_slug, int(t.get("outcomeIndex") or 0), "BUY", usd, float(t["price"]))
         except Exception as exc:
             log(self.state, f"Order failed: {exc}")
             return skip(self.state, "order error")
@@ -197,13 +199,15 @@ class Bot:
         spent["usd"] += shares * px
         self.state["bank"] += shares * px  # buy() takes it back out
         buy(self.state, t, shares * px, px, delay)
-        self.state["positions"][str(t["asset"])]["outcome_index"] = int(t.get("outcomeIndex") or 0)
+        pos = self.state["positions"][str(t["asset"])]
+        pos["outcome_index"] = int(t.get("outcomeIndex") or 0)
+        pos["us_slug"] = us_slug
 
     def live_sell(self, asset: str, fraction: float, why: str = "copied sell") -> None:
         pos = self.state["positions"][asset]
         bid, _ = pm.best_prices(asset)
         try:
-            resp = live_us.sell_qty(pos["slug"], pos.get("outcome_index", 0), pos["shares"] * fraction, bid or pos.get("cur", 0.5))
+            resp = live_us.sell_qty(pos.get("us_slug") or pos["slug"], pos.get("outcome_index", 0), pos["shares"] * fraction, bid or pos.get("cur", 0.5))
         except Exception as exc:
             log(self.state, f"Sell failed: {exc}")
             return skip(self.state, "order error")

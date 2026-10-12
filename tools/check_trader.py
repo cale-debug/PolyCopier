@@ -56,14 +56,19 @@ for b in buys:
 print(f"- slug prefixes (sport/league or topic): {cats.most_common(12)}")
 
 # Polymarket US coverage: try the slug as-is, with the "aec-" prefix US uses for games, then search by title.
-def on_us(b):
-    slug = b.get("slug") or ""
-    for cand in (slug, f"aec-{slug}"):
-        if cand and get(f"{US}/v1/market/slug/{cand}"):
-            return cand
-    return None
+_events = {}
 
-sample = buys[:150]
+
+def on_us(b):
+    """US reuses the event slug and prefixes market slugs (atc-, aec-, ...)."""
+    ev, slug = b.get("eventSlug") or "", b.get("slug") or ""
+    if ev not in _events:
+        body = get(f"{US}/v1/events/slug/{ev}") if ev else None
+        event = (body or {}).get("event") or body or {}
+        _events[ev] = [m.get("slug", "") for m in event.get("markets") or []]
+    return next((s for s in _events[ev] if s == slug or s.endswith("-" + slug)), None)
+
+sample = buys[:300]
 hits = Counter()
 matched = []
 for b in sample:
@@ -71,7 +76,7 @@ for b in sample:
     hits[bool(m)] += 1
     if m and len(matched) < 8:
         matched.append((b.get("title"), b.get("outcome"), m))
-print(f"- on Polymarket US by slug: {hits[True]}/{len(sample)} of recent buys")
+print(f"- on Polymarket US: {hits[True]}/{len(sample)} of recent buys")
 for t in matched:
     print(f"  - {t}")
 print("- sample titles:")

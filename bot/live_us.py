@@ -23,19 +23,35 @@ log = logging.getLogger("bot.us")
 GATEWAY = "https://gateway.polymarket.us"
 
 
-@lru_cache(maxsize=5000)
-def us_market(slug: str) -> Optional[dict]:
-    """The Polymarket US market with this slug, or None if it isn't listed there."""
+@lru_cache(maxsize=2000)
+def _us_event(event_slug: str) -> tuple:
+    """Market slugs in the Polymarket US event with this slug (US reuses event slugs)."""
+    if not event_slug:
+        return ()
+    try:
+        r = requests.get(f"{GATEWAY}/v1/events/slug/{event_slug}", timeout=15)
+    except requests.RequestException:
+        return ()
+    if not r.ok:
+        return ()
+    body = r.json()
+    event = body.get("event") or body
+    return tuple(m.get("slug", "") for m in event.get("markets") or [])
+
+
+def us_market(slug: str, event_slug: str = "") -> Optional[str]:
+    """The Polymarket US market slug matching an international market, or None.
+
+    US keeps the international event slug but prefixes each market slug with a
+    type code (e.g. "atc-" for soccer results, "aec-" for US games), so match on
+    the event, then on the market slug's tail.
+    """
     if not slug:
         return None
-    try:
-        r = requests.get(f"{GATEWAY}/v1/market/slug/{slug}", timeout=15)
-    except requests.RequestException:
-        return None
-    if not r.ok:
-        return None
-    body = r.json()
-    return body.get("market") or body or None
+    for us_slug in _us_event(event_slug):
+        if us_slug == slug or us_slug.endswith("-" + slug):
+            return us_slug
+    return None
 
 
 def has_keys() -> bool:
