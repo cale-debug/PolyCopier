@@ -7,6 +7,7 @@ GitHub's contents API, so the two never step on each other.
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import logging
 import os
@@ -24,6 +25,8 @@ class Store:
         self.api = f"https://api.github.com/repos/{repo}"
         self.h = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
         self.shas: dict = {}
+        self.etags: dict = {}   # path -> (etag, data): unchanged files come back 304, which
+                                # doesn't count against GitHub's hourly API allowance
 
     def ensure_branch(self) -> None:
         r = requests.get(f"{self.api}/branches/{BRANCH}", headers=self.h, timeout=20)
@@ -36,7 +39,12 @@ class Store:
         log.info("Created %s branch", BRANCH)
 
     def read(self, path: str) -> Tuple[Optional[dict], Optional[str]]:
-        r = requests.get(f"{self.api}/contents/{path}", headers=self.h, params={"ref": BRANCH}, timeout=20)
+        h = dict(self.h)
+        if path in self.etags:
+            h["If-None-Match"] = self.etags[path][0]
+        r = requests.get(f"{self.api}/contents/{path}", headers=h, params={"ref": BRANCH}, timeout=20)
+        if r.status_code == 304:
+            return copy.deepcopy(self.etags[path][1]), self.shas.get(path)
         if r.status_code == 404:
             return None, None
         r.raise_for_status()
@@ -47,8 +55,12 @@ class Store:
             raw = requests.get(f"{self.api}/contents/{path}", params={"ref": BRANCH}, timeout=60,
                                headers={**self.h, "Accept": "application/vnd.github.raw"})
             raw.raise_for_status()
-            return raw.json(), body["sha"]
-        return json.loads(base64.b64decode(body["content"])), body["sha"]
+            data = raw.json()
+        else:
+            data = json.loads(base64.b64decode(body["content"]))
+        if r.headers.get("ETag"):
+            self.etags[path] = (r.headers["ETag"], copy.deepcopy(data))
+        return data, body["sha"]
 
     def write(self, path: str, data: dict, message: str) -> bool:
         payload = {

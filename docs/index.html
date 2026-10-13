@@ -63,7 +63,13 @@ td.n, th.n { text-align: right; white-space: nowrap; }
 .feed div { padding: 6px 0; border-bottom: 1px solid rgba(14, 58, 107, .5); font-size: 14px; }
 canvas#eq { width: 100%; height: 120px; display: block; }
 .hidden { display: none; }
-body.viewonly #lockBtn, body.viewonly #haltBtn, body.viewonly #killBtn, body.viewonly [data-tab="live"] { display: none; }
+#books tr { cursor: pointer; }
+#books tr.sel td { background: rgba(46, 230, 255, .12); color: var(--neon); }
+#books tr.sel td:first-child { box-shadow: inset 3px 0 0 var(--neon); }
+.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+canvas#cmp { width: 100%; height: 140px; display: block; margin-top: 10px; }
+button.small { padding: 10px; font-size: 15px; letter-spacing: 4px; }
+body.viewonly #lockBtn, body.viewonly #haltBtn, body.viewonly #killBtn, body.viewonly #addBook, body.viewonly #removeBook, body.viewonly [data-tab="live"] { display: none; }
 body.viewonly .opt { pointer-events: none; }
 body.viewonly #target { pointer-events: none; }
 .warn { border-color: var(--amber); color: var(--amber); }
@@ -96,7 +102,15 @@ ol { padding-left: 20px; line-height: 1.6; } a { color: var(--neon); }
   <!-- ===================== DASH ===================== -->
   <section id="tab-dash">
     <div class="panel">
-      <span class="badge" id="mode">PAPER</span>
+      <div class="label">Traders // tap one to see its book</div>
+      <table class="rep"><thead><tr><th>Trader</th><th class="n">P&amp;L</th><th class="n hide-sm">Return</th><th class="n">W / L</th><th class="n">Open</th><th class="n hide-sm">Copies</th></tr></thead><tbody id="books"></tbody></table>
+      <canvas id="cmp" height="140"></canvas>
+      <div class="hint" id="booksHint">Each trader has a separate paper account with the same starting bank and rules.</div>
+      <button class="big lock small" id="addBook">+ ADD TRADER</button>
+    </div>
+
+    <div class="panel">
+      <span class="badge" id="mode">PAPER</span> <span class="badge" id="bookName">MAIN</span>
       <div class="grid">
         <div><div class="label">Bank</div><div class="val" id="bank">-</div></div>
         <div><div class="label">Exposure</div><div class="val" id="exposure">-</div></div>
@@ -118,10 +132,12 @@ ol { padding-left: 20px; line-height: 1.6; } a { color: var(--neon); }
       <div class="hint" id="hisline"></div>
       <button class="big lock" id="lockBtn">LOCK TARGET</button>
       <button class="big halt" id="haltBtn">HALT</button>
-      <button class="big kill" id="killBtn">⛔ KILL SWITCH - CASH OUT ALL</button>
+      <button class="big lock small" id="removeBook">REMOVE THIS TRADER</button>
+      <button class="big kill" id="killBtn">⛔ KILL SWITCH - CASH OUT ALL TRADERS</button>
     </div>
 
     <div class="panel">
+      <div class="hint" style="margin-top:0">These settings apply to every trader.</div>
       <div class="cols">
         <div>
           <div class="label">Size mode</div>
@@ -246,7 +262,7 @@ ol { padding-left: 20px; line-height: 1.6; } a { color: var(--neon); }
       <div class="hint">Max price above his is the slippage setting on the DASH tab. Skipped copies and why are listed under Skipped.</div>
       <div class="label" style="margin-top:12px">PROP size (% of his bet)</div>
       <input id="propPct" inputmode="decimal">
-      <button class="big kill" id="resetPaper">RESET PAPER ACCOUNT</button>
+      <button class="big kill" id="resetPaper">RESET THIS TRADER'S PAPER ACCOUNT</button>
       <button class="big lock" id="restartBot">RESTART BOT</button>
     </div>
   </section>
@@ -296,14 +312,48 @@ async function readJson(path) {
   return r.ok ? [await r.json(), null] : [cached[path] || null, null];
 }
 
-let settings = null, settingsSha = null, state = null;
+let settings = null, settingsSha = null, state = null, books = null;
+let BOOK = store("book") || "main";
+const COLORS = ["#2ee6ff", "#39ffb0", "#ffc94d", "#ff7ad9", "#3d8bff", "#ff8a3d", "#b18cff", "#c6ff4d", "#ff3b5c", "#7af7ff"];
+
+// Books: "main" copies settings.target; the rest are settings.books entries with their own target and halt switch.
+function bookList() {
+  if (!settings) return [];
+  const extra = (settings.books || []).filter((b) => b.id && b.id !== "main" && b.target);
+  return [{ id: "main", label: settings.target_label || "Main", target: settings.target, halted: settings.halted }, ...extra];
+}
+function curBook() { return bookList().find((b) => b.id === BOOK) || bookList()[0] || { id: "main" }; }
+function bookPath(id) {
+  const live = settings && settings.mode === "live" && (settings.live_book || "main") === id;
+  return live ? "state-live.json" : id === "main" ? "state-paper.json" : `state-paper-${id}.json`;
+}
+// Settings changes for one book: main's live at the top level, the others inside settings.books.
+function bookPatch(id, changes) {
+  return (cur) => {
+    if (id === "main") {
+      const p = {};
+      if ("target" in changes) p.target = changes.target;
+      if ("label" in changes) p.target_label = changes.label;
+      if ("halted" in changes) p.halted = changes.halted;
+      if ("reset" in changes) p.reset_paper = changes.reset;
+      return p;
+    }
+    return { books: (cur.books || []).map((b) => (b.id === id ? { ...b, ...changes } : b)) };
+  };
+}
+function selectBook(id) {
+  if (id === BOOK) return;
+  BOOK = id; store("book", id); state = null;
+  renderSettings(); renderBooks(); refresh();
+}
 
 async function saveSettings(patch, msg) {
   if (!TOKEN) { toast("Connect your GitHub token in SETUP first"); showTab("setup"); return false; }
   const [cur] = await readJson("settings.json");
   const meta = await fetch(`${API()}/contents/settings.json?ref=data&t=${Date.now()}`, { headers: hdr(), cache: "no-store" });
   const sha = meta.ok ? (await meta.json()).sha : null;
-  const next = { ...(cur || settings || {}), ...patch };
+  const base = cur || settings || {};
+  const next = { ...base, ...(typeof patch === "function" ? patch(base) : patch) };
   const body = { message: msg || "Update settings", branch: "data", content: btoa(unescape(encodeURIComponent(JSON.stringify(next, null, 1)))) };
   if (sha) body.sha = sha;
   const r = await fetch(`${API()}/contents/settings.json`, { method: "PUT", headers: hdr(), body: JSON.stringify(body) });
@@ -320,13 +370,16 @@ function setOpts(rowId, value) {
 }
 function renderSettings() {
   if (!settings) return;
-  if (document.activeElement !== $("target")) $("target").value = settings.target_label || settings.target || "";
-  $("locked").textContent = `> locked: ${settings.target_label || ""} [${(settings.target || "").slice(0, 12)}…]`;
+  const bk = curBook();
+  if (document.activeElement !== $("target")) $("target").value = bk.label || bk.target || "";
+  $("locked").textContent = `> locked: ${bk.label || ""} [${(bk.target || "").slice(0, 12)}…]`;
+  $("bookName").textContent = (bk.label || bk.id).toUpperCase();
+  $("removeBook").classList.toggle("hidden", bk.id === "main");
   setOpts("size", settings.size_mode); setOpts("minbet", settings.min_his_bet); setOpts("sells", settings.copy_sells); setOpts("usonly", settings.us_only !== false); setOpts("slipcap", settings.max_slip_cents ?? 1);
   setOpts("startBank", settings.paper_start_bank);
   $("propHint").textContent = settings.size_mode === "prop" ? `PROP = ${settings.prop_pct}% of his dollar size` : "";
-  $("haltBtn").textContent = settings.halted ? "RESUME" : "HALT";
-  $("haltBtn").className = "big " + (settings.halted ? "resume" : "halt");
+  $("haltBtn").textContent = bk.halted ? "RESUME THIS TRADER" : "HALT THIS TRADER";
+  $("haltBtn").className = "big " + (bk.halted ? "resume" : "halt");
   if (document.activeElement !== $("maxTrade")) $("maxTrade").value = settings.live_max_trade;
   if (document.activeElement !== $("dailyCap")) $("dailyCap").value = settings.live_daily_cap;
   if (document.activeElement !== $("propPct")) $("propPct").value = settings.prop_pct;
@@ -414,8 +467,9 @@ function renderState() {
   $("slipline").textContent = sl.n || sl.skipped ? `slippage: avg ${(sl.cents / Math.max(1, sl.n)).toFixed(2)}¢ vs his price over ${sl.n} buys · ${sl.skipped} skipped for price · ${feeTxt}` : feeTxt;
 
   const alive = Date.now() / 1000 - state.heartbeat < 600;
-  $("hb").className = "dot " + (alive ? (settings && settings.halted ? "off" : "on") : "off");
-  $("hbtext").textContent = (delayed ? "UP TO 5 MIN DELAYED · " : "") + (!alive ? `OFFLINE · last seen ${ago(state.heartbeat)} ago` : settings && settings.halted ? "HALTED" : `TRACKING · updated ${ago(state.heartbeat)} ago`);
+  const halted = curBook().halted;
+  $("hb").className = "dot " + (alive ? (halted ? "off" : "on") : "off");
+  $("hbtext").textContent = (delayed ? "UP TO 5 MIN DELAYED · " : "") + (!alive ? `OFFLINE · last seen ${ago(state.heartbeat)} ago` : halted ? "HALTED" : `TRACKING · updated ${ago(state.heartbeat)} ago`);
 
   const rows = Object.values(state.positions).sort((a, b) => b.cost - a.cost).slice(0, 300);
   $("positions").innerHTML = rows.map((p) => {
@@ -437,7 +491,7 @@ function renderState() {
   $("hisline").textContent = his.since ? `> his record since we started copying: ${his.buys} buys · ${his.sells} sells · ${usd(his.usd)} traded · P&L ${sgn(hp.since_copy)}  |  today ${sgn(hp.day)} · month ${sgn(hp.month)} · all-time ${sgn(hp.all)}` : "";
   drawEquity(state.equity || []);
   renderReport();
-  const wantLive = settings && settings.mode === "live";
+  const wantLive = settings && settings.mode === "live" && (settings.live_book || "main") === BOOK;
   $("modebar").textContent = live ? "LIVE MODE // REAL MONEY" : wantLive ? "LIVE REQUESTED // STILL PAPER: " + (state.live_error || "starting up") : "PAPER MODE // NO REAL MONEY";
   $("modebar").classList.toggle("live", live);
   $("modebar").classList.toggle("warn", !live && wantLive);
@@ -446,6 +500,50 @@ function renderState() {
     ((a.outside || []).length ? `<br>Not placed by the bot (left alone): ${a.outside.map((o) => esc(o.title || o.slug) + " " + o.qty).join(", ")}` : "") : "";
   $("liveStatus").textContent = live ? `Live mode is ON. Synced with your Polymarket US account ${a ? ago(a.synced_at) + " ago" : "soon"}.`
     : wantLive ? "Live requested but still on paper: " + (state.live_error || "the bot is restarting.") : "Paper mode. Nothing real is being bought.";
+}
+
+function renderBooks() {
+  const list = bookList();
+  if (!list.length) return;
+  const rows = {};
+  ((books && books.books) || []).forEach((x) => (rows[x.id] = x));
+  if (!list.some((b) => b.id === BOOK)) { BOOK = "main"; store("book", BOOK); }
+  $("books").innerHTML = list.map((b, i) => {
+    const x = rows[b.id];
+    const ret = x && x.start_bank ? (100 * x.pnl) / x.start_bank : 0;
+    const wl = x ? `${x.wins} / ${x.losses}` : "-";
+    const tag = (x && x.mode === "live" ? ' <span class="down">LIVE</span>' : "") + (b.halted ? ' <span class="muted">· halted</span>' : "");
+    return `<tr data-id="${esc(b.id)}" class="${b.id === BOOK ? "sel" : ""}"><td><span class="swatch" style="background:${COLORS[i % COLORS.length]}"></span>${esc(b.label || b.id)}${tag}</td>` +
+      (x ? `<td class="n ${x.pnl < 0 ? "down" : "up"}">${usd(x.pnl)}</td><td class="n hide-sm">${ret.toFixed(2)}%</td><td class="n">${wl}</td><td class="n">${x.open}</td><td class="n hide-sm">${x.copies}</td>`
+         : '<td class="n muted" colspan="5">starting up…</td>') + "</tr>";
+  }).join("");
+  document.querySelectorAll("#books tr").forEach((tr) => (tr.onclick = () => selectBook(tr.dataset.id)));
+  $("booksHint").textContent = books && books.updated
+    ? `Each trader has a separate paper account with the same starting bank and rules. Table updated ${ago(books.updated)} ago.`
+    : "Each trader has a separate paper account with the same starting bank and rules.";
+  drawCompare(list, rows);
+}
+
+function drawCompare(list, rows) {
+  // P&L over time for every trader on one chart, so they can be compared at a glance.
+  const c = $("cmp"), dpr = window.devicePixelRatio || 1, w = c.clientWidth, h = 140;
+  c.width = w * dpr; c.height = h * dpr; const g = c.getContext("2d"); g.scale(dpr, dpr); g.clearRect(0, 0, w, h);
+  const lines = list.map((b, i) => {
+    const x = rows[b.id];
+    return x && (x.curve || []).length > 1 ? { color: COLORS[i % COLORS.length], pts: x.curve.map((p) => [p[0], p[1] - x.start_bank]), sel: b.id === BOOK } : null;
+  }).filter(Boolean);
+  if (!lines.length) return;
+  const all = lines.flatMap((l) => l.pts);
+  const t0 = Math.min(...all.map((p) => p[0])), t1 = Math.max(...all.map((p) => p[0])) || t0 + 1;
+  const lo = Math.min(0, ...all.map((p) => p[1])), hi = Math.max(0, ...all.map((p) => p[1])), span = hi - lo || 1;
+  const X = (t) => ((t - t0) / (t1 - t0 || 1)) * (w - 4) + 2, Y = (v) => h - 8 - ((v - lo) / span) * (h - 16);
+  g.strokeStyle = "rgba(79,134,168,.5)"; g.setLineDash([4, 4]); g.beginPath(); g.moveTo(0, Y(0)); g.lineTo(w, Y(0)); g.stroke(); g.setLineDash([]);
+  lines.sort((a, b) => a.sel - b.sel).forEach((l) => {
+    g.beginPath(); l.pts.forEach((p, i) => (i ? g.lineTo(X(p[0]), Y(p[1])) : g.moveTo(X(p[0]), Y(p[1]))));
+    g.strokeStyle = l.color; g.lineWidth = l.sel ? 2.5 : 1.5; g.globalAlpha = l.sel ? 1 : 0.7;
+    g.shadowColor = l.color; g.shadowBlur = l.sel ? 8 : 0; g.stroke();
+  });
+  g.globalAlpha = 1; g.shadowBlur = 0;
 }
 
 function drawEquity(pts) {
@@ -465,10 +563,12 @@ async function refresh() {
   if (!REPO) { $("hbtext").textContent = "SET UP IN SETUP TAB"; return; }
   try {
     const [s, sha] = await readJson("settings.json"); if (s) { settings = s; settingsSha = sha; renderSettings(); }
-    const mode = settings && settings.mode === "live" ? "live" : "paper";
-    let [st] = await readJson(`state-${mode}.json`);
-    if (!st && mode === "live") [st] = await readJson("state-paper.json");
-    if (st) { state = st; renderState(); }
+    const [bk] = await readJson("books.json"); if (bk) books = bk;
+    renderBooks();
+    const want = BOOK, path = bookPath(want);
+    let [st] = await readJson(path);
+    if (!st && path === "state-live.json") [st] = await readJson(want === "main" ? "state-paper.json" : `state-paper-${want}.json`);
+    if (st && want === BOOK) { state = st; renderState(); }
   } catch (e) { $("hbtext").textContent = "CAN'T REACH GITHUB"; }
 }
 
@@ -485,9 +585,9 @@ document.querySelectorAll("#sells .opt").forEach((b) => (b.onclick = () => saveS
 document.querySelectorAll("#slipcap .opt").forEach((b) => (b.onclick = () => saveSettings({ max_slip_cents: Number(b.dataset.v) }, `Max slippage ${b.dataset.v}`)));
 document.querySelectorAll("#usonly .opt").forEach((b) => (b.onclick = () => saveSettings({ us_only: b.dataset.v === "true" }, "US only")));
 document.querySelectorAll("#startBank .opt").forEach((b) => (b.onclick = () => saveSettings({ paper_start_bank: Number(b.dataset.v) }, "Paper bank")));
-$("haltBtn").onclick = () => saveSettings({ halted: !(settings && settings.halted) }, settings && settings.halted ? "Resume" : "Halt");
-$("killBtn").onclick = () => { if (confirm("Sell every open position now and halt the bot?")) saveSettings({ kill: true }, "Kill switch"); };
-$("resetPaper").onclick = () => { if (confirm("Wipe the paper account and start over?")) saveSettings({ reset_paper: true }, "Reset paper"); };
+$("haltBtn").onclick = () => { const b = curBook(); saveSettings(bookPatch(b.id, { halted: !b.halted }), `${b.halted ? "Resume" : "Halt"} ${b.label}`); };
+$("killBtn").onclick = () => { if (confirm("Sell every open position for EVERY trader now and halt them all?")) saveSettings({ kill: true }, "Kill switch"); };
+$("resetPaper").onclick = () => { const b = curBook(); if (confirm(`Wipe ${b.label}'s paper account and start over?`)) saveSettings(bookPatch(b.id, { reset: true }), `Reset paper ${b.label}`); };
 $("maxExp").onchange = () => saveSettings({ max_exposure_pct: Number($("maxExp").value) || 50 }, "Max exposure");
 document.querySelectorAll("#groupBy .opt").forEach((b) => (b.onclick = () => { groupBy = b.dataset.v; setOpts("groupBy", groupBy); if (state) renderReport(); }));
 $("fDelay").onchange = () => saveSettings({ max_delay_s: Number($("fDelay").value) || 60 }, "Max delay");
@@ -512,7 +612,25 @@ async function resolveTarget(text) {
 $("lockBtn").onclick = async () => {
   const [wallet, label] = await resolveTarget($("target").value);
   if (!wallet) { toast("Couldn't find that trader. Paste their 0x wallet instead."); return; }
-  if (confirm(`Copy ${label} (${wallet.slice(0, 10)}…) from now on?`)) saveSettings({ target: wallet, target_label: label }, `Target ${label}`);
+  const b = curBook();
+  if (confirm(`Copy ${label} (${wallet.slice(0, 10)}…) in this book from now on?`)) saveSettings(bookPatch(b.id, { target: wallet, label }), `Target ${label}`);
+};
+$("addBook").onclick = async () => {
+  if (bookList().length >= 10) return toast("10 traders is the limit.");
+  const text = prompt("Trader to add: Polymarket username or 0x wallet");
+  if (!text) return;
+  const [wallet, label] = await resolveTarget(text);
+  if (!wallet) return toast("Couldn't find that trader. Paste their 0x wallet instead.");
+  if (bookList().some((b) => (b.target || "").toLowerCase() === wallet)) return toast(`${label} is already being copied.`);
+  let id = label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 32) || "trader";
+  const taken = new Set(["main", ...(settings.books || []).map((b) => b.id)]);
+  for (let n = 2; taken.has(id); n++) id = id.replace(/-\d+$/, "") + "-" + n;
+  if (await saveSettings((cur) => ({ books: [...(cur.books || []), { id, label, target: wallet, halted: false }] }), `Add ${label}`)) selectBook(id);
+};
+$("removeBook").onclick = () => {
+  const b = curBook();
+  if (b.id === "main" || !confirm(`Stop copying ${b.label}? Its paper history is kept in the repo.`)) return;
+  saveSettings((cur) => ({ books: (cur.books || []).filter((x) => x.id !== b.id) }), `Remove ${b.label}`).then((ok) => ok && selectBook("main"));
 };
 
 async function putSecret(name, value) {
@@ -535,8 +653,9 @@ $("saveKeys").onclick = async () => {
   } catch (e) { $("keysStatus").textContent = "Saving keys failed (" + e.message + "). Check the token has Secrets: read and write."; }
 };
 $("goLive").onclick = async () => {
-  const typed = prompt(`Real money. Max ${usd(settings.live_max_trade)} per trade, ${usd(settings.live_daily_cap)} per day. Type LIVE to confirm.`);
-  if (typed === "LIVE" && (await saveSettings({ mode: "live", halted: false }, "Go live"))) restartBot();
+  const b = curBook();
+  const typed = prompt(`Real money, copying ${b.label}. Max ${usd(settings.live_max_trade)} per trade, ${usd(settings.live_daily_cap)} per day. Type LIVE to confirm.`);
+  if (typed === "LIVE" && (await saveSettings((cur) => ({ ...bookPatch(b.id, { halted: false })(cur), mode: "live", live_book: b.id }), `Go live with ${b.label}`))) restartBot();
 };
 $("goPaper").onclick = () => saveSettings({ mode: "paper" }, "Back to paper");
 

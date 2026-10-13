@@ -1,4 +1,8 @@
-"""The copy loop: watch the target wallet and mirror each trade.
+"""The copy loop: watch each target wallet and mirror its trades into its own book.
+
+One runner drives several books at once, one per trader (settings.json "books"),
+each with its own paper account. The main book's target is settings "target";
+only the book named by "live_book" can trade real money.
 
     python -m bot.main                 # GitHub Actions (uses GITHUB_TOKEN + repo)
     python -m bot.main --local         # on a computer, state in ./local-data
@@ -12,6 +16,7 @@ import argparse
 import json
 import logging
 import os
+import threading
 import time
 from typing import Optional
 
@@ -27,32 +32,74 @@ HEARTBEAT_EVERY = int(os.environ.get("HEARTBEAT_SECONDS", "300"))
 UPKEEP_BATCH = int(os.environ.get("UPKEEP_BATCH", "150"))
 MAX_POSITIONS = int(os.environ.get("MAX_POSITIONS", "1500"))
 RUN_SECONDS = int(float(os.environ.get("RUN_MINUTES") or 340) * 60)
+# GitHub lets the workflow token make 1,000 API calls an hour per repo, shared by every
+# book, so state saves are spaced at least this far apart across all books together.
+WRITE_GAP = float(os.environ.get("WRITE_GAP_SECONDS", "6"))
+SETTINGS_EVERY = int(os.environ.get("SETTINGS_SECONDS", "15"))
+SUMMARY_EVERY = int(os.environ.get("SUMMARY_SECONDS", "60"))
+MAX_BOOKS = int(os.environ.get("MAX_BOOKS", "10"))
+MAIN = "main"
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(threadName)s] %(message)s")
 L = logging.getLogger("bot")
 
 
+def load_settings(store) -> dict:
+    s, _ = store.read("settings.json")
+    if s is None:
+        s = dict(DEFAULT_SETTINGS)
+        store.write("settings.json", s, "Default settings")
+    return {**DEFAULT_SETTINGS, **s}
+
+
+def book_entry(s: dict, bid: str) -> Optional[dict]:
+    return next((b for b in s.get("books") or [] if b.get("id") == bid), None)
+
+
 class Bot:
-    def __init__(self, store):
+    """One book: a target wallet and the account that copies it."""
+
+    def __init__(self, store, bid: str = MAIN, settings: Optional[dict] = None):
         self.store = store
-        self.store.ensure_branch()
-        self.settings = self.load_settings()
+        self.book_id = bid
+        if settings is None:
+            self.store.ensure_branch()
+            settings = self.load_settings()
+        self.settings = self.view(settings)
         self.mode = self.effective_mode()
         self.state = self.load_state()
         self.dirty = True
+        self.lock = threading.RLock()
+        self.last_save = self.last_upkeep = 0.0
 
     # ------------------------------------------------------------ settings --
     def load_settings(self) -> dict:
-        s, _ = self.store.read("settings.json")
-        if s is None:
-            s = dict(DEFAULT_SETTINGS)
-            self.store.write("settings.json", s, "Default settings")
-        return {**DEFAULT_SETTINGS, **s}
+        return load_settings(self.store)
+
+    def view(self, s: dict) -> dict:
+        """The settings as this book sees them: shared rules, plus its own target and halt switch."""
+        if self.book_id == MAIN:
+            return s
+        b = book_entry(s, self.book_id) or {}
+        return {**s, "target": b.get("target", ""), "target_label": b.get("label", ""),
+                "halted": bool(b.get("halted")), "reset_paper": bool(b.get("reset"))}
+
+    def set_flag(self, s: dict, key: str, value) -> None:
+        """Write this book's halted/reset switch into the raw settings."""
+        if self.book_id == MAIN:
+            s[key] = value
+        else:
+            b = book_entry(s, self.book_id)
+            if b is not None:
+                b["reset" if key == "reset_paper" else key] = value
+
+    def is_live_book(self) -> bool:
+        return self.book_id == str(self.settings.get("live_book") or MAIN)
 
     def effective_mode(self) -> str:
         """Live only when asked for AND the keys reach a real account; otherwise paper, with the reason saved."""
         self.live_error = ""
-        if self.settings.get("mode") == "live":
+        if self.settings.get("mode") == "live" and self.is_live_book():
             if getattr(self, "mode", None) == "live" and live_us.has_keys():
                 return "live"  # already checked the account when we switched
             if not live_us.has_keys():
@@ -65,7 +112,9 @@ class Bot:
         return "paper"
 
     def state_path(self) -> str:
-        return f"state-{self.mode}.json"
+        if self.mode == "live":
+            return "state-live.json"
+        return "state-paper.json" if self.book_id == MAIN else f"state-paper-{self.book_id}.json"
 
     def load_state(self) -> dict:
         st, _ = self.store.read(self.state_path())
@@ -102,6 +151,7 @@ class Bot:
                            category=pos.get("category") or (pos.get("slug") or "other").split("-")[0])
                 add_total(st, gross_in=pos["gross_in"], fees_in=fee, slip=pos["slip"])
         st["mode"] = self.mode
+        st["book"] = self.book_id
         return st
 
     def save(self, why: str = "Update state") -> None:
@@ -111,30 +161,40 @@ class Bot:
         mark(self.state)
         self.store.write(self.state_path(), self.state, why)
         self.dirty = False
+        self.last_save = time.time()
 
-    def refresh_settings(self) -> None:
-        s = self.load_settings()
+    def refresh_settings(self, s: Optional[dict] = None) -> bool:
+        """Take in new settings. With `s` given (the runner's shared copy), one-shot flags this
+        book used are cleared in `s` and True is returned so the runner saves it once;
+        without, the book reads and saves settings.json itself."""
+        standalone = s is None
+        if standalone:
+            s = self.load_settings()
+        changed = False
         old_mode = self.mode
-        self.settings = s
+        self.settings = self.view(s)
         self.mode = self.effective_mode()
         if self.mode != old_mode:
             self.save(f"Leave {old_mode} mode")
             self.state = self.load_state()
             log(self.state, f"Switched to {self.mode.upper()} mode")
             self.dirty = True
-        if s.get("reset_paper") and self.mode == "paper":
+        if self.settings.get("reset_paper") and self.mode == "paper":
             self.state = new_state(float(s["paper_start_bank"]))
-            self.state["mode"] = "paper"
+            self.state.update(mode="paper", book=self.book_id)
             log(self.state, "Paper account reset")
-            s["reset_paper"] = False
-            self.store.write("settings.json", s, "Clear reset flag")
-            self.dirty = True
+            self.set_flag(s, "reset_paper", False)
+            changed = self.dirty = True
         if s.get("kill"):
             self.kill_switch()
-            s["kill"] = False
-            s["halted"] = True
-            self.store.write("settings.json", s, "Kill switch done; halted")
-            self.settings = s
+            self.set_flag(s, "halted", True)
+            changed = True
+            if standalone:
+                s["kill"] = False
+        self.settings = self.view(s)
+        if standalone and changed:
+            self.store.write("settings.json", s, "Settings flags done")
+        return changed
 
     # ---------------------------------------------------------------- copy --
     def target(self) -> str:
@@ -404,9 +464,27 @@ class Bot:
     def halt(self, why: str) -> None:
         log(self.state, why)
         s, _ = self.store.read("settings.json")
-        s = {**DEFAULT_SETTINGS, **(s or {}), "halted": True}
-        self.store.write("settings.json", s, "Auto-halt")
-        self.settings = s
+        s = {**DEFAULT_SETTINGS, **(s or {})}
+        self.set_flag(s, "halted", True)
+        self.store.write("settings.json", s, f"Auto-halt {self.book_id}")
+        self.settings = {**self.view(s), "halted": True}
+
+    def summary(self) -> dict:
+        """One line for the dashboard's comparison of books."""
+        st = self.state
+        eq = round(st["bank"] + exposure(st), 2)
+        pts = st.get("equity") or []
+        step = max(1, len(pts) // 120)
+        t = st.get("totals") or {}
+        return {"id": self.book_id, "label": self.settings.get("target_label") or self.target()[:10],
+                "target": self.target(), "mode": self.mode, "halted": bool(self.settings.get("halted")),
+                "started_at": st.get("started_at"), "start_bank": st["start_bank"], "bank": round(st["bank"], 2),
+                "equity": eq, "pnl": round(eq - st["start_bank"], 2), "realized": round(st["realized"], 2),
+                "wins": st["wins"], "losses": st["losses"], "open": len(st["positions"]),
+                "exposure": round(exposure(st), 2), "fees": round(st.get("fees", 0.0), 2),
+                "wagered": round(t.get("gross_in", 0.0), 2), "us": st.get("us"),
+                "copies": sum(1 for r in st["trades"] if r["side"] == "BUY"), "skipped": sum(st["skipped"].values()),
+                "heartbeat": st.get("heartbeat"), "curve": pts[::step][-120:], "path": self.state_path()}
 
     # ------------------------------------------------------------ upkeep --
     def kill_switch(self) -> None:
@@ -528,31 +606,129 @@ class Bot:
             his["pnl"] = pnl
             self.his_stats_at = time.time()
 
+    def step(self) -> None:
+        """One pass of this book's own loop: copy new trades, and re-price positions when due."""
+        with self.lock:
+            self.poll()
+            if time.time() - self.last_upkeep > UPKEEP_EVERY:
+                self.upkeep()
+                self.last_upkeep = time.time()
+                self.dirty = True
+
+    def save_due(self, now: float) -> bool:
+        # Save only when something changed (plus a slow heartbeat), so viewers
+        # can poll every 15s without burning through GitHub's rate limit.
+        return (self.dirty and now - self.last_save > SAVE_EVERY) or now - self.last_save > HEARTBEAT_EVERY
+
+
+class Runner:
+    """Drives every book. Each book polls its trader on its own thread (so one book's slow
+    upkeep never delays another's copies); this thread reads settings once for all of them
+    and spaces out the saves so the books share GitHub's API allowance."""
+
+    def __init__(self, store):
+        self.store = store
+        store.ensure_branch()
+        self.settings = load_settings(self.store)
+        self.bots: dict = {}
+        self.threads: dict = {}
+        self.stop = threading.Event()
+        self.sync_books(self.settings)
+
+    def wanted(self, s: dict) -> list:
+        ids = [MAIN]
+        for b in s.get("books") or []:
+            if b.get("id") and b["id"] not in ids and b.get("target") and len(ids) < MAX_BOOKS:
+                ids.append(b["id"])
+        return ids
+
+    def sync_books(self, s: dict) -> None:
+        want = self.wanted(s)
+        for bid in [b for b in self.bots if b not in want]:
+            bot = self.bots.pop(bid)
+            with bot.lock:
+                log(bot.state, "Book removed from settings; stopped")
+                bot.save("Book removed")
+        for bid in want:
+            if bid not in self.bots:
+                bot = self.bots[bid] = Bot(self.store, bid, s)
+                log(bot.state, f"Runner started ({bot.mode})")
+                if self.threads:  # already running: start its loop now
+                    self.start_thread(bot)
+
+    def start_thread(self, bot: Bot) -> None:
+        def loop():
+            while not self.stop.is_set() and self.bots.get(bot.book_id) is bot:
+                try:
+                    bot.step()
+                except Exception as exc:  # keep running through API hiccups
+                    L.exception("[%s] loop error: %s", bot.book_id, exc)
+                self.stop.wait(POLL)
+        t = self.threads[bot.book_id] = threading.Thread(target=loop, name=bot.book_id, daemon=True)
+        t.start()
+
+    def refresh_settings(self) -> None:
+        s = load_settings(self.store)
+        self.sync_books(s)
+        changed = False
+        for bot in list(self.bots.values()):
+            with bot.lock:
+                changed |= bot.refresh_settings(s)
+        if s.get("kill"):
+            s["kill"] = False
+            changed = True
+        if changed:
+            self.store.write("settings.json", s, "Settings flags done")
+        self.settings = s
+
+    def write_summary(self) -> None:
+        rows = []
+        for bot in list(self.bots.values()):
+            with bot.lock:
+                rows.append(bot.summary())
+        self.store.write("books.json", {"updated": int(time.time()), "books": rows}, "Books summary")
+
+    def save_one(self, now: float) -> bool:
+        due = [b for b in self.bots.values() if b.save_due(now)]
+        if not due:
+            return False
+        bot = min(due, key=lambda b: b.last_save)
+        with bot.lock:
+            bot.save()
+        return True
+
     def run(self) -> None:
         start = time.time()
-        last_save = last_settings = last_upkeep = 0.0
-        log(self.state, f"Runner started ({self.mode})")
+        last_settings = last_write = last_summary = 0.0
+        for bot in list(self.bots.values()):
+            self.start_thread(bot)
         while time.time() - start < RUN_SECONDS:
             now = time.time()
             try:
-                if now - last_settings > 15:
+                if now - last_settings > SETTINGS_EVERY:
                     self.refresh_settings()
                     last_settings = now
-                self.poll()
-                if now - last_upkeep > UPKEEP_EVERY:
-                    self.upkeep()
-                    last_upkeep = now
-                    self.dirty = True
-                # Save only when something changed (plus a slow heartbeat), so viewers
-                # can poll every 15s without burning through GitHub's rate limit.
-                if (self.dirty and now - last_save > SAVE_EVERY) or now - last_save > HEARTBEAT_EVERY:
-                    self.save()
-                    last_save = now
-            except Exception as exc:  # keep running through API hiccups
-                L.exception("Loop error: %s", exc)
-            time.sleep(POLL)
-        self.upkeep()
-        self.save("Runner finished")
+                if now - last_write >= WRITE_GAP:
+                    if now - last_summary > SUMMARY_EVERY:
+                        self.write_summary()
+                        last_summary = last_write = now
+                    elif self.save_one(now):
+                        last_write = now
+            except Exception as exc:
+                L.exception("Runner error: %s", exc)
+            time.sleep(1)
+        self.stop.set()
+        for t in self.threads.values():
+            t.join(timeout=60)
+        for bot in list(self.bots.values()):
+            with bot.lock:
+                try:
+                    bot.upkeep()
+                except Exception as exc:
+                    L.exception("[%s] final upkeep: %s", bot.book_id, exc)
+                bot.save("Runner finished")
+                time.sleep(1)
+        self.write_summary()
 
 
 def main() -> None:
@@ -560,7 +736,7 @@ def main() -> None:
     ap.add_argument("--local", action="store_true")
     args = ap.parse_args()
     store = LocalStore() if args.local else Store(os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_TOKEN"])
-    Bot(store).run()
+    Runner(store).run()
 
 
 if __name__ == "__main__":

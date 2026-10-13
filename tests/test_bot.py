@@ -385,3 +385,79 @@ def test_orders_round_to_tick_in_our_favour(monkeypatch):
     fill = {"executions": [{"lastShares": "2", "lastPx": {"value": "0.46"},
                             "commissionNotionalCollected": {"value": "0.03", "currency": "USD"}}]}
     assert live_us.filled(fill)[2] == 0.03
+
+
+def _books_settings(**extra):
+    return {**DEFAULT_SETTINGS, "target": "0xmain", "target_label": "Main", **extra,
+            "books": [{"id": "kch", "label": "Kch-Temp", "target": "0xkch"},
+                      {"id": "ice", "label": "ic4cream", "target": "0xice", "halted": True},
+                      {"id": "blank", "label": "No wallet yet", "target": ""}]}
+
+
+def test_runner_keeps_a_separate_book_per_trader(tmp_path, monkeypatch):
+    fake = {"0xmain": [], "0xkch": []}
+    monkeypatch.setattr(pm, "new_trades", lambda w, s: [t for t in fake.get(w, []) if t["timestamp"] >= s])
+    monkeypatch.setattr(pm, "best_prices", lambda a: (0.38, 0.42))
+    monkeypatch.setattr(live_us, "us_market", lambda slug, event="": "atc-" + slug)
+    store = LocalStore(str(tmp_path))
+    store.write("settings.json", _books_settings(), "")
+    r = main.Runner(store)
+    assert list(r.bots) == ["main", "kch", "ice"]                  # a book with no wallet isn't started
+    for b in r.bots.values():
+        b.poll()
+    now = r.bots["kch"].state["cursor"]["ts"]
+    fake["0xkch"] = [dict(TRADE, timestamp=now + 1)]
+    fake["0xice"] = [dict(TRADE, timestamp=now + 1)]
+    for b in r.bots.values():
+        b.poll()
+        b.save()
+    assert "A" in r.bots["kch"].state["positions"] and not r.bots["main"].state["positions"]
+    assert r.bots["ice"].state["skipped"] == {"halted": 1}          # its own halt switch, not main's
+    assert store.read("state-paper-kch.json")[0]["positions"] and not store.read("state-paper.json")[0]["positions"]
+    r.write_summary()
+    rows = {x["id"]: x for x in store.read("books.json")[0]["books"]}
+    assert rows["kch"]["label"] == "Kch-Temp" and rows["kch"]["copies"] == 1 and rows["ice"]["halted"] is True
+    assert rows["kch"]["path"] == "state-paper-kch.json"
+
+
+def test_runner_flags_reset_halt_and_kill_per_book(tmp_path, monkeypatch):
+    monkeypatch.setattr(pm, "best_prices", lambda a: (0.38, 0.42))
+    monkeypatch.setattr(live_us, "us_market", lambda slug, event="": "atc-" + slug)
+    store = LocalStore(str(tmp_path))
+    store.write("settings.json", _books_settings(), "")
+    r = main.Runner(store)
+    kch, m = r.bots["kch"], r.bots["main"]
+    kch.copy(dict(TRADE), 1)
+    m.copy(dict(TRADE), 1)
+    s = store.read("settings.json")[0]
+    main.book_entry(s, "kch")["reset"] = True
+    store.write("settings.json", s, "")
+    r.refresh_settings()
+    assert not kch.state["positions"] and m.state["positions"]       # only that book was reset
+    assert main.book_entry(store.read("settings.json")[0], "kch")["reset"] is False
+    # Auto-halt on one book halts that book only.
+    kch.halt("test")
+    s = store.read("settings.json")[0]
+    assert main.book_entry(s, "kch")["halted"] is True and s["halted"] is False
+    # The kill switch cashes out every book and halts them all.
+    store.write("settings.json", {**s, "kill": True}, "")
+    r.refresh_settings()
+    s = store.read("settings.json")[0]
+    assert not m.state["positions"] and s["kill"] is False and s["halted"] is True
+    assert all(b.get("halted") for b in s["books"] if b["id"] != "blank")
+    # Removing a book from settings stops it.
+    s["books"] = [b for b in s["books"] if b["id"] != "ice"]
+    store.write("settings.json", s, "")
+    r.refresh_settings()
+    assert "ice" not in r.bots
+
+
+def test_only_the_live_book_trades_real_money(tmp_path, monkeypatch):
+    store = LocalStore(str(tmp_path))
+    store.write("settings.json", _books_settings(mode="live", live_book="kch"), "")
+    monkeypatch.setattr(live_us, "has_keys", lambda: True)
+    monkeypatch.setattr(live_us, "account", lambda: {"cash": 50.0, "buying_power": 50.0,
+                                                     "positions_value": 0.0, "open_orders": 0.0})
+    r = main.Runner(store)
+    assert r.bots["kch"].mode == "live" and r.bots["kch"].state_path() == "state-live.json"
+    assert r.bots["main"].mode == "paper" and r.bots["ice"].state_path() == "state-paper-ice.json"
