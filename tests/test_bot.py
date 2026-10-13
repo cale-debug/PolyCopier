@@ -317,3 +317,20 @@ def test_settles_when_polymarket_us_resolves_first(tmp_path, monkeypatch):
     bot.upkeep()
     assert not bot.state["positions"] and bot.state["wins"] == 1 and bot.state["realized"] > 0
     assert bot.state["closed"][0]["exit"] == "resolved"
+
+
+def test_older_position_without_side_settles_on_its_own_side(tmp_path, monkeypatch):
+    # A Brewers position bought before sides were stored: Brewers are the short side
+    # of the US contract, and the Brewers won. It must settle as a win, not a loss.
+    bot = _bot(tmp_path, monkeypatch, ask=0.46, bid=0.45)
+    teams = ((("los angeles dodgers",), True), (("milwaukee brewers",), False))
+    monkeypatch.setattr(live_us, "_market", lambda slug: (teams, 0.0695, False))
+    bot.copy(dict(TRADE, outcome="Milwaukee Brewers", price=0.45), 3)
+    pos = bot.state["positions"]["A"]
+    assert pos.pop("long") is False
+    monkeypatch.setattr(live_us, "settlement", lambda slug, long: 0.0 if long else 1.0)
+    monkeypatch.setattr(pm, "resolution", lambda a: None)
+    monkeypatch.setattr(pm, "midpoint", lambda a: 0.9995)
+    monkeypatch.setattr(pm, "leaderboard_pnl", lambda w: {})
+    bot.upkeep()
+    assert bot.state["wins"] == 1 and bot.state["realized"] > 0

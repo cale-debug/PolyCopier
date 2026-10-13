@@ -304,7 +304,8 @@ class Bot:
         if not pos:
             return
         fraction = self.exit_fraction(pos, asset, sold)
-        bid, _ = live_us.quote(pos["us_slug"], pos.get("long", True)) if pos.get("us_slug") else pm.best_prices(asset)
+        bid, _ = live_us.quote(pos["us_slug"], pos["long"]) if pos.get("us_slug") and self.us_side(pos) is not None \
+            else pm.best_prices(asset)
         if bid is not None:
             sell(sh, asset, fraction, bid, "copied sell")
         self._shadow_tidy(sh)
@@ -318,8 +319,8 @@ class Bot:
     def quote(self, asset: str):
         """(bid, ask) for a position we hold, from the book it trades on."""
         pos = self.state["positions"].get(asset) or {}
-        if pos.get("us_slug"):
-            return live_us.quote(pos["us_slug"], pos.get("long", True))
+        if pos.get("us_slug") and self.us_side(pos) is not None:
+            return live_us.quote(pos["us_slug"], pos["long"])
         return pm.best_prices(asset)
 
     def live_buy(self, t: dict, usd: float, us_slug: Optional[str], long: bool, ask: float, delay: int,
@@ -365,12 +366,12 @@ class Bot:
 
     def live_sell(self, asset: str, fraction: float, why: str = "copied sell") -> None:
         pos = self.state["positions"][asset]
-        if not pos.get("us_slug"):
-            return skip(self.state, "not on Polymarket US")
-        bid, _ = live_us.quote(pos["us_slug"], pos.get("long", True))
+        if not pos.get("us_slug") or self.us_side(pos) is None:
+            return skip(self.state, "can't place sell on Polymarket US")
+        bid, _ = live_us.quote(pos["us_slug"], pos["long"])
         limit = max(0.01, (bid or pos.get("cur", 0.5)) - 0.02)
         try:
-            resp = live_us.place(pos["us_slug"], pos.get("long", True), "SELL", pos["shares"] * fraction, limit)
+            resp = live_us.place(pos["us_slug"], pos["long"], "SELL", pos["shares"] * fraction, limit)
         except Exception as exc:
             log(self.state, f"Sell failed: {exc}")
             return skip(self.state, "order error")
@@ -398,6 +399,17 @@ class Bot:
             sell(self.state, asset, 1.0, bid if bid is not None else 0.0, "kill switch")
         self.save("Kill switch")
 
+    @staticmethod
+    def us_side(pos: dict) -> Optional[bool]:
+        """Whether a position is the long side of its US contract (None if that can't be told).
+
+        Older positions didn't store this, so work it out from the outcome name; never
+        assume a side, since settling on the wrong one flips a win into a loss.
+        """
+        if pos.get("long") is None and pos.get("us_slug"):
+            pos["long"] = live_us.side_for(pos["us_slug"], pos.get("outcome"))
+        return pos.get("long")
+
     def resolution(self, asset: str, pos: dict):
         """Settlement value (1.0/0.0) of a position, or None while the game is still open.
 
@@ -410,8 +422,8 @@ class Bot:
             us_slug, long, _ = live_us.match(pos["slug"], pos.get("event_slug") or pos["slug"], pos.get("outcome"))
             if us_slug:
                 pos.update(us_slug=us_slug, long=long, us=True)
-        if pos.get("us_slug"):
-            res = live_us.settlement(pos["us_slug"], pos.get("long", True))
+        if pos.get("us_slug") and self.us_side(pos) is not None:
+            res = live_us.settlement(pos["us_slug"], pos["long"])
             if res is not None:
                 return res
         return pm.resolution(asset)
