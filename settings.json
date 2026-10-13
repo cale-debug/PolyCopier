@@ -12,7 +12,7 @@
  "kill": false,
  "mode": "paper",
  "live_max_trade": 1,
- "live_daily_cap": 50,
+ "live_daily_cap": 15,
  "paper_start_bank": 3000,
  "max_exposure_pct": 50,
  "max_drawdown_pct": 25,
