@@ -1,8 +1,10 @@
 name: Copy bot
 
 # Runs the copier around the clock on GitHub's free runners (free and unlimited
-# for public repos). Each run lasts ~5h40m; the schedule queues the next one so
-# there is no gap. Only one run is ever active at a time.
+# for public repos). Each run lasts ~5h40m. Every run queues the next one as soon
+# as it starts, so the next run takes over the moment this one ends. GitHub's
+# cron is best-effort and often skipped for an hour or more, so it is only a
+# backup. Only one run is ever active at a time.
 on:
   schedule:
     - cron: "*/20 * * * *"
@@ -18,13 +20,18 @@ concurrency:
 
 permissions:
   contents: write
-  actions: read
+  actions: write
 
 jobs:
   copy:
     runs-on: ubuntu-latest
     timeout-minutes: 355
     steps:
+      - name: Queue the next run
+        continue-on-error: true
+        run: gh workflow run bot.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
