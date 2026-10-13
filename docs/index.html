@@ -474,6 +474,7 @@ async function refresh() {
 
 // ---- controls -----------------------------------------------------------
 function showTab(name) {
+  if (name === "live") checkKeys();
   document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
   ["dash", "live", "setup"].forEach((n) => $("tab-" + n).classList.toggle("hidden", n !== name));
 }
@@ -529,7 +530,8 @@ $("saveKeys").onclick = async () => {
   try {
     await putSecret("POLYMARKET_KEY_ID", id); await putSecret("POLYMARKET_SECRET_KEY", sec);
     $("keyId").value = ""; $("keySecret").value = "";
-    $("keysStatus").textContent = "Keys saved as GitHub Secrets. Press RESTART BOT in SETUP so the bot loads them.";
+    $("keysStatus").textContent = "Keys saved as GitHub Secrets. Now tap GO LIVE when you're ready.";
+    setTimeout(checkKeys, 1500);
   } catch (e) { $("keysStatus").textContent = "Saving keys failed (" + e.message + "). Check the token has Secrets: read and write."; }
 };
 $("goLive").onclick = async () => {
@@ -545,11 +547,38 @@ async function restartBot() {
   toast(d.ok ? "Bot restarting. Give it a minute." : "Restart failed: " + d.status);
 }
 $("restartBot").onclick = () => (TOKEN ? restartBot() : toast("Connect your GitHub token first"));
+async function checkAccess() {
+  // Each permission the dashboard needs, tested with a harmless read.
+  const ok = async (url) => { try { return (await fetch(url, { headers: hdr() })).status; } catch (e) { return 0; } };
+  const repo = await ok(API());
+  if (repo === 401) return "That token was rejected by GitHub (expired, deleted, or pasted wrong). Make a new one.";
+  if (repo !== 200) return `Couldn't open ${REPO} (${repo}). Check the repo name is owner/PolyCopier.`;
+  const checks = [["Secrets", `${API()}/actions/secrets/public-key`], ["Actions", `${API()}/actions/workflows`],
+                  ["Contents", `${API()}/contents/settings.json?ref=data`]];
+  const bad = [];
+  for (const [name, url] of checks) if ((await ok(url)) !== 200) bad.push(name);
+  return bad.length ? `Connected, but the token is missing: ${bad.join(", ")}. Edit the token on GitHub and set those to Read and write.`
+    : "Connected. Contents, Secrets and Actions all reachable.";
+}
+async function checkKeys() {
+  if (!TOKEN) return ($("keysStatus").textContent = "Connect your GitHub token in SETUP first.");
+  try {
+    const r = await fetch(`${API()}/actions/secrets`, { headers: hdr() });
+    if (!r.ok) return ($("keysStatus").textContent = `Can't see saved keys (${r.status}): the token needs Secrets access.`);
+    const names = ((await r.json()).secrets || []).reduce((m, x) => ((m[x.name] = x.updated_at), m), {});
+    const have = ["POLYMARKET_KEY_ID", "POLYMARKET_SECRET_KEY"].filter((n) => names[n]);
+    $("keysStatus").textContent = have.length === 2 ? `Polymarket keys are saved (last changed ${new Date(names.POLYMARKET_SECRET_KEY).toLocaleString()}).`
+      : have.length ? `Only ${have[0]} is saved. Enter both keys and SAVE KEYS again.` : "No Polymarket keys saved yet.";
+  } catch (e) { $("keysStatus").textContent = "Couldn't check saved keys: " + e.message; }
+}
 $("saveSetup").onclick = async () => {
-  REPO = $("repo").value.trim(); TOKEN = $("token").value.trim();
+  REPO = $("repo").value.trim();
+  const t = $("token").value.trim();
+  if (t && !t.startsWith("•")) TOKEN = t;  // the dots are just the saved token's placeholder
   store("repo", REPO); store("token", TOKEN);
-  const r = await fetch(API(), { headers: hdr() });
-  $("setupStatus").textContent = r.ok ? "Connected." : `Couldn't open ${REPO} with that token (${r.status}).`;
+  $("setupStatus").textContent = "Checking…";
+  $("setupStatus").textContent = await checkAccess();
+  checkKeys();
   refresh();
 };
 $("repo").value = REPO; $("token").value = TOKEN ? "••••••••" : "";
