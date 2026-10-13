@@ -6,7 +6,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from bot import live_us, main, polymarket as pm  # noqa: E402
-from bot.portfolio import DEFAULT_SETTINGS, bet_size, buy, new_state, sell, should_copy_buy  # noqa: E402
+from bot.portfolio import (DEFAULT_SETTINGS, bet_size, buy, new_state, sell, should_copy_buy,  # noqa: E402
+                           taker_fee)
 from bot.store import LocalStore  # noqa: E402
 import pytest  # noqa: E402
 
@@ -16,7 +17,8 @@ def offline_us_book(monkeypatch):
     # Tests price US markets off the same fake book as international ones, and allow
     # the 2-cent gap between his 0.40 and the 0.42 ask unless a test says otherwise.
     monkeypatch.setattr(live_us, "quote", lambda slug, long: pm.best_prices(slug))
-    monkeypatch.setattr(live_us, "_sides", lambda slug: ())
+    monkeypatch.setattr(live_us, "_market", lambda slug: ((), None))
+    monkeypatch.setattr(pm, "his_position_shares", lambda w, a: 0.0)
     monkeypatch.setitem(DEFAULT_SETTINGS, "max_slip_cents", 5.0)
 
 TRADE = {"asset": "A", "title": "Will X?", "outcome": "Yes", "slug": "will-x", "price": 0.40,
@@ -36,9 +38,9 @@ def test_skip_rules():
 
 def test_buy_sell_and_win_loss():
     st = new_state(100)
-    buy(st, TRADE, 10, 0.50, 3)
+    buy(st, TRADE, 10, 0.50, 3, theta=0)           # fee-free here; fees have their own test
     assert round(st["bank"], 2) == 90 and round(st["positions"]["A"]["shares"], 4) == 20
-    sell(st, "A", 0.5, 0.60, "copied sell")       # +1.00 on half
+    sell(st, "A", 0.5, 0.60, "copied sell", fee=0)  # +1.00 on half
     assert round(st["realized"], 2) == 1.0 and st["wins"] == 0  # still open
     sell(st, "A", 1.0, 0.0, "resolved")            # -5.00 on the rest
     assert "A" not in st["positions"]
@@ -49,7 +51,23 @@ def test_buy_sell_and_win_loss():
 def test_buy_never_spends_more_than_bank():
     st = new_state(3)
     buy(st, TRADE, 5, 0.5, 0)
-    assert st["bank"] == 0 and round(st["positions"]["A"]["cost"], 2) == 3
+    assert 0 <= st["bank"] < 0.1 and round(st["positions"]["A"]["cost"] + st["bank"], 2) == 3
+
+
+def test_fees_match_polymarket_us_examples():
+    # Worked examples from docs.polymarket.us/fees (1,000 contracts each).
+    assert taker_fee(1000, 0.10) == 6.26
+    assert taker_fee(1000, 0.65) == 15.81
+    assert taker_fee(1000, 0.30) == 14.60
+    assert taker_fee(1000, 0.50) == 17.38
+    assert taker_fee(1000, 0.50, 0.10) == 25.00
+    # A $1 copy at 46c pays 4c, which counts against the position.
+    st = new_state(100)
+    buy(st, TRADE, 1, 0.46, 0)
+    pos = st["positions"]["A"]
+    assert st["fees"] == 0.04 and round(pos["cost"], 2) == 1.04 and round(st["bank"], 2) == 98.96
+    sell(st, "A", 1.0, 1.0, "resolved")           # settlement is free
+    assert st["fees"] == 0.04 and round(st["realized"], 2) == round(1 / 0.46 - 1.04, 2)
 
 
 class Fake:
@@ -72,7 +90,7 @@ def test_loop_copies_buys_and_sells(tmp_path, monkeypatch):
     now = bot.state["cursor"]["ts"]
     fake.trades = [
         dict(TRADE, timestamp=now + 1),
-        dict(TRADE, timestamp=now + 2, transactionHash="0x2", slug="elsewhere", usdcSize=50),
+        dict(TRADE, timestamp=now + 2, transactionHash="0x2", asset="B", slug="elsewhere", usdcSize=50),
         dict(TRADE, timestamp=now + 3, transactionHash="0x3", side="SELL", size=500),
     ]
     bot.settings["min_his_bet"] = 100
@@ -83,7 +101,7 @@ def test_loop_copies_buys_and_sells(tmp_path, monkeypatch):
     assert len(buys) == 1 and buys[0]["price"] == 0.42
     assert bot.state["skipped"] == {"below min bet": 1}  # checked before the US filter
     assert bot.state["us"] == {"checked": 2, "available": 1}
-    # He sold 500 and has 500 left, so we sell half at the bid.
+    # He bought 1000 and sold 500, so we sell half at the bid.
     assert len(sells) == 1 and abs(bot.state["positions"]["A"]["shares"] - (1 / 0.42) / 2) < 1e-9
 
 
@@ -179,3 +197,20 @@ def test_us_side_matching(monkeypatch):
     assert live_us.is_long("aec-x", "Eagles", 1) is True
     assert live_us.is_long("aec-x", "No", 0) is False
     assert live_us.is_long("aec-x", "Yes", 1) is True
+
+
+def test_exits_follow_his_share_of_stack_even_when_halted(tmp_path, monkeypatch):
+    monkeypatch.setattr(pm, "best_prices", lambda a: (0.40, 0.42))
+    monkeypatch.setattr(live_us, "us_market", lambda slug, event="": "atc-" + slug)
+    monkeypatch.setattr(pm, "his_position_shares", lambda w, a: 400.0)  # he held 400 before we started
+    bot = main.Bot(LocalStore(str(tmp_path)))
+    bot.copy(dict(TRADE, size=100), 1)             # we start copying: he now has 400 (API) incl. this buy
+    bot.settings["max_slip_cents"] = 0
+    bot.copy(dict(TRADE, size=200), 1)             # skipped for price, but he now has 600
+    assert bot.state["positions"]["A"]["his_shares"] == 600
+    ours = bot.state["positions"]["A"]["shares"]
+    bot.settings["halted"] = True
+    bot.copy(dict(TRADE, side="SELL", size=300), 1)  # half his stack
+    assert abs(bot.state["positions"]["A"]["shares"] - ours / 2) < 1e-9
+    bot.copy(dict(TRADE, side="SELL", size=300), 1)  # the rest: we're out too
+    assert "A" not in bot.state["positions"]

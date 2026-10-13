@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import logging
 import time
+from decimal import ROUND_HALF_EVEN, Decimal
 from typing import Optional
 
 MAX_TRADES_KEPT = 400
 MAX_EQUITY_POINTS = 3000
+TAKER_FEE = 0.0695  # Polymarket US standard taker fee coefficient (docs.polymarket.us/fees)
 
 DEFAULT_SETTINGS = {
     "target": "0x4f1d5ae26fc31472966e951af3183308736d8de2",  # e46m3
@@ -54,6 +56,7 @@ def new_state(bank: float) -> dict:
         "heartbeat": 0,
         "live_spent_today": {"day": "", "usd": 0.0},
         "log": [],
+        "fees": 0.0,
         "slip": {"n": 0, "cents": 0.0, "skipped": 0},  # our buy price vs his, in cents
     }
 
@@ -75,6 +78,13 @@ def should_copy_buy(settings: dict, his_usd: float) -> Optional[str]:
     if his_usd < float(settings.get("min_his_bet", 0) or 0):
         return "below min bet"
     return None
+
+
+def taker_fee(shares: float, price: float, theta: float = TAKER_FEE) -> float:
+    """Polymarket US taker fee: theta x contracts x p x (1 - p), banker's-rounded to the cent."""
+    p = Decimal(str(price))
+    raw = Decimal(str(theta)) * Decimal(str(round(shares, 6))) * p * (1 - p)
+    return float(raw.quantize(Decimal("0.01"), rounding=ROUND_HALF_EVEN))
 
 
 def slip_ok(settings: dict, his_price: float, our_price: float) -> bool:
@@ -102,13 +112,19 @@ def _record(state: dict, **row) -> None:
     del state["trades"][MAX_TRADES_KEPT:]
 
 
-def buy(state: dict, trade: dict, usd: float, price: float, delay: int) -> Optional[dict]:
-    """Open or add to a paper position at `price`. Returns the fill or None."""
-    usd = min(usd, state["bank"])
-    if usd < 0.01 or not 0 < price < 1:
-        skip(state, "no cash" if usd < 0.01 else "bad price")
+def buy(state: dict, trade: dict, usd: float, price: float, delay: int,
+        theta: float = TAKER_FEE) -> Optional[dict]:
+    """Spend `usd` on contracts at `price`, plus the taker fee. Returns the fill or None."""
+    if not 0 < price < 1:
+        skip(state, "bad price")
+        return None
+    fee = taker_fee(usd / price, price, theta)
+    usd = min(usd, state["bank"] - fee)
+    if usd < 0.01:
+        skip(state, "no cash")
         return None
     shares = usd / price
+    fee = taker_fee(shares, price, theta)
     asset = trade["asset"]
     pos = state["positions"].get(asset) or {
         "asset": asset, "title": trade.get("title", ""), "outcome": trade.get("outcome", ""),
@@ -116,27 +132,36 @@ def buy(state: dict, trade: dict, usd: float, price: float, delay: int) -> Optio
         "shares": 0.0, "cost": 0.0, "opened_at": int(time.time()),
     }
     pos["shares"] += shares
-    pos["cost"] += usd
+    pos["cost"] += usd + fee  # fees are part of what the position cost us
     pos["avg"] = pos["cost"] / pos["shares"]
     pos.setdefault("cur", price)
+    pos["theta"] = theta
     state["positions"][asset] = pos
-    state["bank"] -= usd
+    state["bank"] -= usd + fee
+    state["fees"] = round(state.get("fees", 0.0) + fee, 2)
     fill = {"side": "BUY", "title": pos["title"], "outcome": pos["outcome"], "price": round(price, 4),
-            "usd": round(usd, 2), "shares": round(shares, 4), "his_price": trade.get("price"),
+            "usd": round(usd, 2), "fee": fee, "shares": round(shares, 4), "his_price": trade.get("price"),
             "his_usd": round(float(trade.get("usdcSize") or 0), 2), "delay": delay}
     _record(state, **fill)
     return fill
 
 
-def sell(state: dict, asset: str, fraction: float, price: float, why: str) -> Optional[dict]:
-    """Sell `fraction` of a position at `price` (1.0 or 0.0 for resolution)."""
+def sell(state: dict, asset: str, fraction: float, price: float, why: str,
+         fee: Optional[float] = None) -> Optional[dict]:
+    """Sell `fraction` of a position at `price` (1.0 or 0.0 for resolution).
+
+    Sales pay the taker fee unless `fee` is given; settlement ("resolved") is free.
+    """
     pos = state["positions"].get(asset)
     if not pos or pos["shares"] <= 0:
         return None
     fraction = max(0.0, min(1.0, fraction))
     shares = pos["shares"] * fraction
     cost = pos["cost"] * fraction
-    proceeds = shares * price
+    if fee is None:
+        fee = 0.0 if why == "resolved" else taker_fee(shares, price, pos.get("theta", TAKER_FEE))
+    proceeds = shares * price - fee
+    state["fees"] = round(state.get("fees", 0.0) + fee, 2)
     pnl = proceeds - cost
     pos["shares"] -= shares
     pos["cost"] -= cost
@@ -153,7 +178,7 @@ def sell(state: dict, asset: str, fraction: float, price: float, why: str) -> Op
     else:
         pos["closed_pnl"] = pos.get("closed_pnl", 0.0) + pnl
     fill = {"side": "SELL" if why != "resolved" else "SETTLE", "title": pos["title"], "outcome": pos["outcome"],
-            "price": round(price, 4), "usd": round(proceeds, 2), "shares": round(shares, 4),
+            "price": round(price, 4), "usd": round(proceeds, 2), "fee": fee, "shares": round(shares, 4),
             "pnl": round(pnl, 2), "note": why}
     _record(state, **fill)
     return fill

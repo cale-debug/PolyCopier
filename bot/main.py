@@ -16,7 +16,7 @@ from typing import Optional
 
 from . import live_us, polymarket as pm
 from .portfolio import (DEFAULT_SETTINGS, bet_size, buy, exposure, log, mark, new_state,
-                        sell, should_copy_buy, skip, slip_ok, track_slip)
+                        sell, should_copy_buy, skip, slip_ok, taker_fee, track_slip, TAKER_FEE)
 from .store import LocalStore, Store
 
 POLL = float(os.environ.get("POLL_SECONDS", "3"))
@@ -65,6 +65,16 @@ class Bot:
             if self.mode == "live":
                 bank = live_us.balance() or 0.0
             st = new_state(bank)
+        if "fees" not in st:
+            # Positions opened before fees were tracked: charge the buy fee they would have paid.
+            st["fees"] = 0.0
+            for pos in st["positions"].values():
+                fee = taker_fee(pos["shares"], pos["avg"])
+                pos.update(cost=pos["cost"] + fee, theta=pos.get("theta", TAKER_FEE))
+                pos["avg"] = pos["cost"] / pos["shares"]
+                st["bank"] -= fee
+                st["fees"] = round(st["fees"] + fee, 2)
+            log(st, f"Charged ${st['fees']:.2f} of fees on positions opened before fees were tracked")
         st["mode"] = self.mode
         return st
 
@@ -140,9 +150,13 @@ class Bot:
         his_usd = float(t.get("usdcSize") or 0) or float(t.get("size") or 0) * float(t.get("price") or 0)
         us_slug = live_us.us_market(t.get("slug") or "", t.get("eventSlug") or "")
         on_us = us_slug is not None
+        his_size = float(t.get("size") or 0)
         if side == "BUY":
             self.state["us"]["checked"] += 1
             self.state["us"]["available"] += on_us
+            held = self.state["positions"].get(asset)
+            if held is not None and "his_shares" in held:
+                held["his_shares"] += his_size  # so we know what share of his stack a later sell is
         if side == "BUY":
             why = should_copy_buy(self.settings, his_usd)
             if why:
@@ -175,21 +189,27 @@ class Bot:
                 return skip(self.state, "price moved past slippage cap")
             if self.mode == "live":
                 return self.live_buy(t, usd, us_slug, long, ask, delay)
-            fill = buy(self.state, t, usd, ask, delay)
+            fill = buy(self.state, t, usd, ask, delay, live_us.fee_coefficient(us_slug))
             if fill:
                 track_slip(self.state, his_price, ask)
                 pos = self.state["positions"][asset]
                 pos.update(us=on_us, us_slug=us_slug, long=long)
+                self.seed_his_shares(pos, his_size)
                 L.info("BUY  $%.2f %s %s @ %.3f (he paid %.3f, %ds late)", usd, t.get("outcome"),
                        t.get("title"), ask, his_price, delay)
         elif side == "SELL":
-            if not self.settings.get("copy_sells") or self.settings.get("halted"):
+            # Exits are followed even while halted: halting stops new bets, not getting out.
+            if not self.settings.get("copy_sells") or asset not in self.state["positions"]:
                 return
-            if asset not in self.state["positions"]:
-                return
-            left = pm.his_position_shares(self.target(), asset)
+            pos = self.state["positions"][asset]
             sold = float(t.get("size") or 0)
-            fraction = sold / (sold + left) if sold + left > 0 else 1.0
+            before = pos.get("his_shares")
+            if not before:
+                before = sold + pm.his_position_shares(self.target(), asset)
+            fraction = min(1.0, sold / before) if before > 0 else 1.0
+            pos["his_shares"] = max(0.0, before - sold)
+            if pos["his_shares"] < 1e-6:
+                fraction = 1.0  # he's fully out, so are we
             if self.mode == "live":
                 return self.live_sell(asset, fraction)
             bid, _ = self.quote(asset)
@@ -197,6 +217,11 @@ class Bot:
                 return skip(self.state, "no buyers")
             sell(self.state, asset, fraction, bid, "copied sell")
             L.info("SELL %.0f%% of %s @ %.3f", fraction * 100, t.get("title"), bid)
+
+    def seed_his_shares(self, pos: dict, his_size: float) -> None:
+        """On our first buy of an outcome, note how many shares he holds (including any from before we started)."""
+        if "his_shares" not in pos:
+            pos["his_shares"] = max(pm.his_position_shares(self.target(), pos["asset"]), his_size)
 
     # ---------------------------------------------------------------- live --
     def quote(self, asset: str):
@@ -231,10 +256,14 @@ class Bot:
         if shares <= 0:
             return skip(self.state, "not filled")
         track_slip(self.state, his_price, px)
-        spent["usd"] += shares * px
-        self.state["bank"] += shares * px  # buy() takes it back out
-        buy(self.state, t, shares * px, px, delay)
-        self.state["positions"][str(t["asset"])].update(us=True, us_slug=us_slug, long=long)
+        theta = live_us.fee_coefficient(us_slug)
+        fee = taker_fee(shares, px, theta)
+        spent["usd"] += shares * px + fee
+        self.state["bank"] = max(self.state["bank"], shares * px + fee)  # the order already filled; record it in full
+        buy(self.state, t, shares * px, px, delay, theta)
+        pos = self.state["positions"][str(t["asset"])]
+        pos.update(us=True, us_slug=us_slug, long=long)
+        self.seed_his_shares(pos, float(t.get("size") or 0))
 
     def live_sell(self, asset: str, fraction: float, why: str = "copied sell") -> None:
         pos = self.state["positions"][asset]

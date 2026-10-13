@@ -330,7 +330,8 @@ function renderState() {
   $("usline").textContent = us.checked ? `on Polymarket US: ${us.available} of ${us.checked} of his buys (${Math.round((100 * us.available) / us.checked)}%) · started ${new Date(state.started_at * 1000).toLocaleDateString()} with ${usd(state.start_bank)}` : `started with ${usd(state.start_bank)}`;
 
   const sl = state.slip || { n: 0, cents: 0, skipped: 0 };
-  $("slipline").textContent = sl.n || sl.skipped ? `slippage: avg ${(sl.cents / Math.max(1, sl.n)).toFixed(2)}¢ vs his price over ${sl.n} buys · ${sl.skipped} skipped for price` : "";
+  const feeTxt = `fees paid ${usd(state.fees || 0)} (included in P&L)`;
+  $("slipline").textContent = sl.n || sl.skipped ? `slippage: avg ${(sl.cents / Math.max(1, sl.n)).toFixed(2)}¢ vs his price over ${sl.n} buys · ${sl.skipped} skipped for price · ${feeTxt}` : feeTxt;
 
   const alive = Date.now() / 1000 - state.heartbeat < 600;
   $("hb").className = "dot " + (alive ? (settings && settings.halted ? "off" : "on") : "off");
@@ -345,7 +346,8 @@ function renderState() {
   $("feed").innerHTML = state.trades.slice(0, 40).map((t) => {
     const cls = t.side === "BUY" ? "" : (t.pnl >= 0 ? "up" : "down");
     const extra = t.side === "BUY" ? ` · he paid ${cents(t.his_price || 0)} for ${usd(t.his_usd)} · ${slip(t)} · ${t.delay}s late` : ` · P&L ${usd(t.pnl)}`;
-    return `<div class="${cls}"><span class="muted">${ago(t.ts)}</span> ${t.side} ${usd(t.usd)} ${esc(t.outcome)} @ ${cents(t.price)} · ${esc(t.title)}<span class="muted">${extra}</span></div>`;
+    const fee = t.fee ? ` · fee ${usd(t.fee)}` : "";
+    return `<div class="${cls}"><span class="muted">${ago(t.ts)}</span> ${t.side} ${usd(t.usd)} ${esc(t.outcome)} @ ${cents(t.price)} · ${esc(t.title)}<span class="muted">${fee}${extra}</span></div>`;
   }).join("") || '<div class="muted">Waiting for his next trade…</div>';
   $("skipped").textContent = Object.entries(state.skipped || {}).map(([k, v]) => `${k}: ${v}`).join(" · ") || "none";
   $("log").innerHTML = (state.log || []).slice(0, 12).map(([ts, m]) => `<div><span class="muted">${ago(ts)}</span> ${esc(m)}</div>`).join("");

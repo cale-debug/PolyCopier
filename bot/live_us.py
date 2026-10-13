@@ -65,18 +65,33 @@ def _client():
 
 
 @lru_cache(maxsize=2000)
-def _sides(us_slug: str) -> tuple:
-    """((name, is_long), ...) for each side of a Polymarket US market."""
+def _market(us_slug: str) -> tuple:
+    """(sides, fee coefficient) of a Polymarket US market; sides are ((names), is_long) pairs."""
     try:
         r = requests.get(f"{GATEWAY}/v1/market/slug/{us_slug}", timeout=15)
         m = (r.json() or {}).get("market") or {} if r.ok else {}
     except (requests.RequestException, ValueError):
-        return ()
-    out = []
+        return (), None
+    sides = []
     for side in m.get("marketSides") or []:
         names = {str(side.get("description") or "").lower(), str((side.get("team") or {}).get("name") or "").lower()}
-        out.append((tuple(n for n in names if n), bool(side.get("long"))))
-    return tuple(out)
+        sides.append((tuple(n for n in names if n), bool(side.get("long"))))
+    try:
+        theta = float(m["feeCoefficient"])
+    except (KeyError, TypeError, ValueError):
+        theta = None
+    return tuple(sides), theta
+
+
+def _sides(us_slug: str) -> tuple:
+    return _market(us_slug)[0]
+
+
+def fee_coefficient(us_slug: str) -> float:
+    """Taker fee coefficient for this market (0.0695 for most; table tennis is higher)."""
+    from .portfolio import TAKER_FEE
+    theta = _market(us_slug)[1] if us_slug else None
+    return TAKER_FEE if theta is None else theta
 
 
 def is_long(us_slug: str, outcome: str, outcome_index: int) -> bool:
