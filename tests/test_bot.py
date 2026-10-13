@@ -24,6 +24,7 @@ def offline_us_book(monkeypatch):
     monkeypatch.setattr(live_us, "quote", lambda slug, long: pm.best_prices(slug))
     monkeypatch.setattr(live_us, "_market", lambda slug: ((), None, False))
     monkeypatch.setattr(pm, "his_position_shares", lambda w, a: 0.0)
+    monkeypatch.setattr(live_us, "settlement", lambda slug, long: None)
     monkeypatch.setitem(DEFAULT_SETTINGS, "max_slip_cents", 5.0)
 
 TRADE = {"asset": "A", "title": "Will X?", "outcome": "Yes", "slug": "will-x", "price": 0.40,
@@ -303,3 +304,16 @@ def test_partial_exits_and_settlement(tmp_path, monkeypatch):
     row = bot.state["closed"][0]
     assert row["exit"] == "resolved" and bot.state["totals"]["settled"] > 0
     assert bot.state["shadow"]["wins"] == 1 and not bot.state["shadow"]["positions"]
+
+
+def test_settles_when_polymarket_us_resolves_first(tmp_path, monkeypatch):
+    bot = _bot(tmp_path, monkeypatch, ask=0.46, bid=0.45)
+    bot.copy(dict(TRADE, outcome="Yes", price=0.45), 3)
+    assert bot.state["positions"]
+    monkeypatch.setattr(pm, "resolution", lambda a: None)          # international still pending
+    monkeypatch.setattr(pm, "midpoint", lambda a: 0.9995)
+    monkeypatch.setattr(pm, "leaderboard_pnl", lambda w: {})
+    monkeypatch.setattr(live_us, "settlement", lambda slug, long: 1.0 if long else 0.0)
+    bot.upkeep()
+    assert not bot.state["positions"] and bot.state["wins"] == 1 and bot.state["realized"] > 0
+    assert bot.state["closed"][0]["exit"] == "resolved"

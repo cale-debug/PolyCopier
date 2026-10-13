@@ -154,8 +154,8 @@ def buy(state: dict, trade: dict, usd: float, price: float, delay: int,
     his_price = float(trade.get("price") or 0)
     pos = state["positions"].get(asset) or {
         "asset": asset, "title": trade.get("title", ""), "outcome": trade.get("outcome", ""),
-        "slug": trade.get("slug", ""), "condition_id": trade.get("conditionId", ""),
-        "category": category(trade), "shares": 0.0, "cost": 0.0, "opened_at": int(time.time()),
+        "slug": trade.get("slug", ""), "event_slug": trade.get("eventSlug", ""),
+        "condition_id": trade.get("conditionId", ""), "category": category(trade), "shares": 0.0, "cost": 0.0, "opened_at": int(time.time()),
     }
     pos["shares"] += shares
     pos["cost"] += usd + fee  # fees are part of what the position cost us

@@ -398,6 +398,24 @@ class Bot:
             sell(self.state, asset, 1.0, bid if bid is not None else 0.0, "kill switch")
         self.save("Kill switch")
 
+    def resolution(self, asset: str, pos: dict):
+        """Settlement value (1.0/0.0) of a position, or None while the game is still open.
+
+        Positions on Polymarket US settle when the US market resolves; anything else
+        when the international market does.
+        """
+        if not pos.get("us_slug") and pos.get("slug") and "us_checked" not in pos:
+            # Opened before US matching was stored: look the contract up once.
+            pos["us_checked"] = True
+            us_slug, long, _ = live_us.match(pos["slug"], pos.get("event_slug") or pos["slug"], pos.get("outcome"))
+            if us_slug:
+                pos.update(us_slug=us_slug, long=long, us=True)
+        if pos.get("us_slug"):
+            res = live_us.settlement(pos["us_slug"], pos.get("long", True))
+            if res is not None:
+                return res
+        return pm.resolution(asset)
+
     def upkeep(self) -> None:
         # Price-check a slice of positions each pass so thousands of them don't stall the loop.
         assets = sorted(self.state["positions"])
@@ -409,7 +427,7 @@ class Bot:
             pos = self.state["positions"].get(asset)
             if pos is None:
                 continue
-            res = pm.resolution(asset)
+            res = self.resolution(asset, pos)
             if res is not None:
                 sell(self.state, asset, 1.0, res, "resolved")
                 if asset in sh["positions"]:
@@ -427,7 +445,7 @@ class Bot:
             part = (extra[s0:] + extra[:s0])[:max(10, UPKEEP_BATCH // 5)]
             sh["upkeep_at"] = s0 + len(part)
             for asset in part:
-                res = pm.resolution(asset)
+                res = self.resolution(asset, sh["positions"][asset])
                 if res is not None:
                     sell(sh, asset, 1.0, res, "resolved")
                 else:

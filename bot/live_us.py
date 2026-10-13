@@ -127,6 +127,29 @@ def fee_coefficient(us_slug: str) -> float:
     return TAKER_FEE if theta is None else theta
 
 
+def settlement(us_slug: str, long: bool) -> Optional[float]:
+    """1.0 / 0.0 for our side once the Polymarket US market has resolved, else None.
+
+    US markets settle on their own schedule, often hours before the international
+    market finishes its resolution process, and this is where real money would settle.
+    """
+    try:
+        r = requests.get(f"{GATEWAY}/v1/market/slug/{us_slug}", timeout=15)
+        m = (r.json() or {}).get("market") or {} if r.ok else {}
+    except (requests.RequestException, ValueError):
+        return None
+    if m.get("status") != "MARKET_STATUS_RESOLVED":
+        return None
+    for side in m.get("marketSides") or []:
+        if bool(side.get("long")) == bool(long):
+            try:
+                px = float(side.get("price"))
+            except (TypeError, ValueError):
+                return None
+            return px if px in (0.0, 1.0) else None
+    return None
+
+
 def is_long(us_slug: str, outcome: str, outcome_index: int) -> bool:
     """Best-effort side for positions opened before strict matching; new copies use match()."""
     side = side_for(us_slug, outcome)
