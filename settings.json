@@ -10,7 +10,7 @@
  "copy_sells": true,
  "halted": false,
  "kill": false,
- "mode": "paper",
+ "mode": "live",
  "live_max_trade": 1,
  "live_daily_cap": 15,
  "paper_start_bank": 3000,
