@@ -40,6 +40,9 @@ h1 { font-size: 40px; letter-spacing: 10px; text-transform: uppercase; margin: 1
 .val.neg { color: var(--red); text-shadow: 0 0 8px rgba(255, 59, 92, .5); }
 .badge { display: inline-block; margin-bottom: 12px; font-size: 12px; letter-spacing: 3px; padding: 4px 10px; border-radius: 4px; border: 1px solid var(--neon); color: var(--neon); }
 .badge.live { border-color: var(--red); color: var(--red); box-shadow: 0 0 10px var(--red); }
+.modebar { text-align: center; padding: 8px; margin: 0 0 14px; border: 1px solid var(--neon); border-radius: 6px; letter-spacing: 4px; color: var(--neon); font-size: 14px; }
+.modebar.live { border-color: var(--red); color: #1a0006; background: var(--red); box-shadow: 0 0 16px var(--red); }
+table.rep td, table.rep th { padding: 6px 4px; font-size: 13px; }
 input { width: 100%; background: #000; border: 1px solid var(--line); color: var(--neon); font: inherit; font-size: 20px; padding: 12px; border-radius: 6px; outline: none; }
 input:focus { border-color: var(--neon); box-shadow: 0 0 10px rgba(46, 230, 255, .35); }
 .hint { color: var(--dim); font-size: 13px; margin: 8px 0 12px; word-break: break-all; }
@@ -87,6 +90,8 @@ ol { padding-left: 20px; line-height: 1.6; } a { color: var(--neon); }
     <button class="tab" data-tab="live">GO LIVE</button>
     <button class="tab" data-tab="setup">SETUP</button>
   </div>
+
+  <div class="modebar" id="modebar">PAPER MODE // NO REAL MONEY</div>
 
   <!-- ===================== DASH ===================== -->
   <section id="tab-dash">
@@ -148,6 +153,22 @@ ol { padding-left: 20px; line-height: 1.6; } a { color: var(--neon); }
         </div>
         <div class="hint">Buys that would cost more than this over his price are skipped.</div>
       </div>
+    </div>
+
+    <div class="panel">
+      <div class="label">After costs</div>
+      <table class="rep"><tbody id="costs"></tbody></table>
+      <div class="label" style="margin-top:14px">With filters vs copy at any price</div>
+      <table class="rep"><thead><tr><th></th><th class="n">Positions</th><th class="n">W / L</th><th class="n">Fees</th><th class="n">Net P&amp;L</th></tr></thead><tbody id="compare"></tbody></table>
+      <div class="hint">"Any price" copies every signal the moment we see it, ignoring the delay, spread, liquidity and slippage filters.</div>
+      <div class="label" style="margin-top:14px">Closed trades by</div>
+      <div class="row" id="groupBy">
+        <button class="opt on" data-v="category">SPORT</button><button class="opt" data-v="hold">HOLD TIME</button>
+        <button class="opt" data-v="delay">DELAY</button><button class="opt" data-v="fill">FILL</button>
+      </div>
+      <table class="rep" style="margin-top:8px"><thead><tr><th>Group</th><th class="n">Trades</th><th class="n">Win %</th><th class="n">Fees</th><th class="n">Net</th><th class="n hide-sm">Per $1</th></tr></thead><tbody id="groups"></tbody></table>
+      <div class="label" style="margin-top:14px">Lost to costs</div>
+      <div class="hint" id="lostToCosts"></div>
     </div>
 
     <div class="panel">
@@ -215,6 +236,13 @@ ol { padding-left: 20px; line-height: 1.6; } a { color: var(--neon); }
         <div><div class="label">Max % in open bets</div><input id="maxExp" inputmode="decimal"></div>
         <div><div class="label">Halt if down %</div><input id="maxDd" inputmode="decimal"></div>
       </div>
+      <div class="label" style="margin-top:12px">Copy filters</div>
+      <div class="cols">
+        <div><div class="label">Max delay (sec)</div><input id="fDelay" inputmode="decimal"></div>
+        <div><div class="label">Max spread (&cent;)</div><input id="fSpread" inputmode="decimal"></div>
+        <div><div class="label">Min $ at best price</div><input id="fDepth" inputmode="decimal"></div>
+      </div>
+      <div class="hint">Max price above his is the slippage setting on the DASH tab. Skipped copies and why are listed under Skipped.</div>
       <div class="label" style="margin-top:12px">PROP size (% of his bet)</div>
       <input id="propPct" inputmode="decimal">
       <button class="big kill" id="resetPaper">RESET PAPER ACCOUNT</button>
@@ -302,6 +330,9 @@ function renderSettings() {
   if (document.activeElement !== $("dailyCap")) $("dailyCap").value = settings.live_daily_cap;
   if (document.activeElement !== $("propPct")) $("propPct").value = settings.prop_pct;
   if (document.activeElement !== $("maxExp")) $("maxExp").value = settings.max_exposure_pct ?? 50;
+  if (document.activeElement !== $("fDelay")) $("fDelay").value = settings.max_delay_s ?? 60;
+  if (document.activeElement !== $("fSpread")) $("fSpread").value = settings.max_spread_cents ?? 5;
+  if (document.activeElement !== $("fDepth")) $("fDepth").value = settings.min_depth_usd ?? 20;
   if (document.activeElement !== $("maxDd")) $("maxDd").value = settings.max_drawdown_pct ?? 25;
   $("liveStatus").textContent = settings.mode === "live" ? "Live mode is ON." : "Paper mode. Nothing real is being bought.";
 }
@@ -309,6 +340,55 @@ function renderSettings() {
 function slip(t) {
   const d = Math.round((t.price - (t.his_price || 0)) * 1000) / 10;
   return d > 0 ? `+${d}¢ vs him` : d < 0 ? `${d}¢ vs him` : "same price";
+}
+
+let groupBy = "category";
+function bucket(r) {
+  if (groupBy === "category") return (r.category || "other").toUpperCase();
+  if (groupBy === "fill") return r.partial ? "PARTIAL FILL" : "FULL FILL";
+  if (groupBy === "delay") return r.delay < 5 ? "under 5s" : r.delay < 15 ? "5-15s" : r.delay < 60 ? "15-60s" : "60s+";
+  const h = (r.closed - (r.opened || r.closed)) / 3600;
+  return h < 1 ? "under 1h" : h < 6 ? "1-6h" : h < 24 ? "6-24h" : "1d+";
+}
+function book(st) {
+  // Gross = what contracts sold/settled/are worth minus what they cost; net = gross - fees.
+  const t = st.totals || {};
+  const open = Object.values(st.positions || {});
+  const openVal = open.reduce((a, p) => a + p.shares * (p.cur ?? p.avg), 0);
+  const openCost = open.reduce((a, p) => a + p.cost, 0);
+  const fees = (t.fees_in || 0) + (t.fees_out || 0);
+  const gross = (t.gross_out || 0) + openVal - (t.gross_in || 0);
+  return { t, fees, gross, net: gross - fees, openVal, unreal: openVal - openCost, n: (st.wins || 0) + (st.losses || 0) + open.length,
+           wl: `${st.wins || 0} / ${st.losses || 0}` };
+}
+function renderReport() {
+  const b = book(state), t = b.t;
+  const rows = [
+    ["Gross P&L (before fees)", b.gross], ["Entry fees", -(t.fees_in || 0)], ["Exit fees", -(t.fees_out || 0)],
+    ["Net P&L", b.net], ["  realized (closed)", state.realized], ["  unrealized (open, at mid)", b.unreal],
+    ["Slippage vs his prices (inside gross)", -(t.slip || 0)], ["Settlement payouts received", t.settled || 0],
+  ];
+  const roc = state.start_bank ? (100 * b.net) / state.start_bank : 0;
+  const per = t.gross_in ? (100 * b.net) / t.gross_in : 0;
+  $("costs").innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td class="n ${v < 0 ? "down" : v > 0 ? "up" : ""}">${usd(v)}</td></tr>`).join("") +
+    `<tr><td>Return on ${usd(state.start_bank)} bank</td><td class="n">${roc.toFixed(2)}%</td></tr>` +
+    `<tr><td>Return per $ wagered</td><td class="n">${per.toFixed(1)}%</td></tr>`;
+  const sh = state.shadow ? book(state.shadow) : null;
+  const line = (name, x) => `<tr><td>${name}</td><td class="n">${x.n}</td><td class="n">${x.wl}</td><td class="n">${usd(x.fees)}</td><td class="n ${x.net < 0 ? "down" : "up"}">${usd(x.net)}</td></tr>`;
+  $("compare").innerHTML = line("With filters (you)", b) + (sh ? line("Any price", sh) : `<tr><td colspan="5" class="muted">Starts with his next trade</td></tr>`);
+  const closed = state.closed || [];
+  const g = {};
+  closed.forEach((r) => { const k = bucket(r); const x = (g[k] = g[k] || { n: 0, w: 0, fees: 0, net: 0, cost: 0 });
+    x.n++; x.w += r.net >= 0; x.fees += r.fees_in + r.fees_out; x.net += r.net; x.cost += r.gross_in; });
+  $("groups").innerHTML = Object.entries(g).sort((a, b) => b[1].n - a[1].n).map(([k, x]) =>
+    `<tr><td>${esc(k)}</td><td class="n">${x.n}</td><td class="n">${Math.round((100 * x.w) / x.n)}%</td><td class="n">${usd(x.fees)}</td><td class="n ${x.net < 0 ? "down" : "up"}">${usd(x.net)}</td><td class="n hide-sm">${x.cost ? ((100 * x.net) / x.cost).toFixed(1) + "%" : "-"}</td></tr>`).join("")
+    || '<tr><td colspan="6" class="muted">No closed trades yet</td></tr>';
+  const lost = closed.filter((r) => r.gross >= 0 && r.net < 0);
+  const losers = closed.filter((r) => r.net < 0).length;
+  $("lostToCosts").innerHTML = closed.length
+    ? `${lost.length} of ${closed.length} closed trades made money before costs but lost after fees and slippage. ${losers} lost overall.` +
+      lost.slice(0, 8).map((r) => `<div>${esc(r.outcome)} · ${esc(r.title)}: gross ${usd(r.gross)}, fees ${usd(r.fees_in + r.fees_out)}, net ${usd(r.net)}</div>`).join("")
+    : "Nothing closed yet.";
 }
 
 function renderState() {
@@ -356,6 +436,9 @@ function renderState() {
   const sgn = (x) => (x === undefined ? "?" : usd(x));
   $("hisline").textContent = his.since ? `> his record since we started copying: ${his.buys} buys · ${his.sells} sells · ${usd(his.usd)} traded · P&L ${sgn(hp.since_copy)}  |  today ${sgn(hp.day)} · month ${sgn(hp.month)} · all-time ${sgn(hp.all)}` : "";
   drawEquity(state.equity || []);
+  renderReport();
+  $("modebar").textContent = live ? "LIVE MODE // REAL MONEY" : "PAPER MODE // NO REAL MONEY";
+  $("modebar").classList.toggle("live", live);
 }
 
 function drawEquity(pts) {
@@ -398,6 +481,10 @@ $("haltBtn").onclick = () => saveSettings({ halted: !(settings && settings.halte
 $("killBtn").onclick = () => { if (confirm("Sell every open position now and halt the bot?")) saveSettings({ kill: true }, "Kill switch"); };
 $("resetPaper").onclick = () => { if (confirm("Wipe the paper account and start over?")) saveSettings({ reset_paper: true }, "Reset paper"); };
 $("maxExp").onchange = () => saveSettings({ max_exposure_pct: Number($("maxExp").value) || 50 }, "Max exposure");
+document.querySelectorAll("#groupBy .opt").forEach((b) => (b.onclick = () => { groupBy = b.dataset.v; setOpts("groupBy", groupBy); if (state) renderReport(); }));
+$("fDelay").onchange = () => saveSettings({ max_delay_s: Number($("fDelay").value) || 60 }, "Max delay");
+$("fSpread").onchange = () => saveSettings({ max_spread_cents: Number($("fSpread").value) || 5 }, "Max spread");
+$("fDepth").onchange = () => saveSettings({ min_depth_usd: Number($("fDepth").value) || 0 }, "Min liquidity");
 $("maxDd").onchange = () => saveSettings({ max_drawdown_pct: Number($("maxDd").value) || 25 }, "Max drawdown");
 $("propPct").onchange = () => saveSettings({ prop_pct: Number($("propPct").value) || 1 }, "Prop %");
 $("maxTrade").onchange = () => saveSettings({ live_max_trade: Number($("maxTrade").value) || 1 }, "Live max trade");

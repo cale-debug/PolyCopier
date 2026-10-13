@@ -9,13 +9,14 @@ Runs for RUN_SECONDS, then exits so the workflow can start a fresh run.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import time
 from typing import Optional
 
 from . import live_us, polymarket as pm
-from .portfolio import (DEFAULT_SETTINGS, bet_size, buy, exposure, log, mark, new_state,
+from .portfolio import (DEFAULT_SETTINGS, add_total, bet_size, buy, exposure, log, mark, new_state,
                         sell, should_copy_buy, skip, slip_ok, taker_fee, track_slip, TAKER_FEE)
 from .store import LocalStore, Store
 
@@ -75,6 +76,18 @@ class Bot:
                 st["bank"] -= fee
                 st["fees"] = round(st["fees"] + fee, 2)
             log(st, f"Charged ${st['fees']:.2f} of fees on positions opened before fees were tracked")
+        if "totals" not in st:
+            # Positions opened before the cost breakdown existed: rebuild it from the fill log.
+            st.setdefault("closed", [])
+            for pos in st["positions"].values():
+                buys = [r for r in st["trades"] if r["side"] == "BUY" and r["title"] == pos["title"]
+                        and r["outcome"] == pos["outcome"]]
+                fee = round(pos["cost"] - sum(r["usd"] for r in buys), 2) if buys else 0.0
+                pos.update(gross_in=pos["cost"] - fee, fees_in=fee, fills=len(buys) or 1,
+                           delay_sum=sum(r.get("delay") or 0 for r in buys),
+                           slip=sum(r["shares"] * (r["price"] - float(r.get("his_price") or r["price"])) for r in buys),
+                           category=pos.get("category") or (pos.get("slug") or "other").split("-")[0])
+                add_total(st, gross_in=pos["gross_in"], fees_in=fee, slip=pos["slip"])
         st["mode"] = self.mode
         return st
 
@@ -148,7 +161,7 @@ class Bot:
         side = str(t.get("side")).upper()
         asset = str(t.get("asset"))
         his_usd = float(t.get("usdcSize") or 0) or float(t.get("size") or 0) * float(t.get("price") or 0)
-        us_slug = live_us.us_market(t.get("slug") or "", t.get("eventSlug") or "")
+        us_slug, long, no_match = live_us.match(t.get("slug") or "", t.get("eventSlug") or "", t.get("outcome"))
         on_us = us_slug is not None
         his_size = float(t.get("size") or 0)
         if side == "BUY":
@@ -162,7 +175,9 @@ class Bot:
             if why:
                 return skip(self.state, why)
             if self.settings.get("us_only", True) and not on_us:
-                return skip(self.state, "not on Polymarket US")
+                return skip(self.state, no_match)
+            if not on_us:
+                long = True  # international book, outcome token is exact
             if self.settings.get("once_per_market", False) and asset in self.state["positions"]:
                 return skip(self.state, "already holding")
             cond = t.get("conditionId")
@@ -178,38 +193,49 @@ class Bot:
                 return skip(self.state, "drawdown limit")
             if exposure(self.state) + usd > equity * float(self.settings.get("max_exposure_pct", 50)) / 100:
                 return skip(self.state, "exposure limit")
-            long = live_us.is_long(us_slug, t.get("outcome"), t.get("outcomeIndex")) if us_slug else True
             his_price = float(t.get("price") or 0)
             # Price off the book we'd really trade on: Polymarket US when the market is there.
-            _, ask = live_us.quote(us_slug, long) if us_slug else pm.best_prices(asset)
+            if us_slug:
+                b = live_us.book(us_slug, long) or {}
+            else:
+                bid, ask = pm.best_prices(asset)
+                b = {"bid": bid, "ask": ask, "spread": round(ask - bid, 4) if bid and ask else None}
+            ask = b.get("ask")
             if ask is None:
                 return skip(self.state, "no sellers")
-            if not slip_ok(self.settings, his_price, ask):
-                self.state.setdefault("slip", {"n": 0, "cents": 0.0, "skipped": 0})["skipped"] += 1
-                return skip(self.state, "price moved past slippage cap")
+            self.shadow_buy(t, usd, ask, delay, us_slug, long)
+            why = self.price_filter(b, his_price, delay)
+            if why:
+                return skip(self.state, why)
+            meta = {"src": asset, "src_market": t.get("conditionId"), "dst": us_slug, "dst_side": "YES" if long else "NO",
+                    "bid": b.get("bid"), "ask": ask, "spread": b.get("spread"), "depth": b.get("ask_shares")}
             if self.mode == "live":
-                return self.live_buy(t, usd, us_slug, long, ask, delay)
-            fill = buy(self.state, t, usd, ask, delay, live_us.fee_coefficient(us_slug))
+                return self.live_buy(t, usd, us_slug, long, ask, delay, meta)
+            # Paper fill: we can only take what's resting at the best ask; the rest is a missed fill.
+            depth = b.get("ask_shares") or 0
+            partial = bool(depth) and usd / ask > depth
+            if partial:
+                usd = depth * ask
+                skip(self.state, "partial fill (book too thin)")
+            meta["fill"] = "partial" if partial else "full"
+            fill = buy(self.state, t, usd, ask, delay, live_us.fee_coefficient(us_slug), meta=meta)
             if fill:
                 track_slip(self.state, his_price, ask)
                 pos = self.state["positions"][asset]
                 pos.update(us=on_us, us_slug=us_slug, long=long)
+                pos["partial"] = pos.get("partial", 0) + partial
                 self.seed_his_shares(pos, his_size)
                 L.info("BUY  $%.2f %s %s @ %.3f (he paid %.3f, %ds late)", usd, t.get("outcome"),
                        t.get("title"), ask, his_price, delay)
         elif side == "SELL":
             # Exits are followed even while halted: halting stops new bets, not getting out.
-            if not self.settings.get("copy_sells") or asset not in self.state["positions"]:
+            if not self.settings.get("copy_sells"):
                 return
-            pos = self.state["positions"][asset]
+            if asset not in self.state["positions"]:
+                return self.shadow_sell(asset, float(t.get("size") or 0))
             sold = float(t.get("size") or 0)
-            before = pos.get("his_shares")
-            if not before:
-                before = sold + pm.his_position_shares(self.target(), asset)
-            fraction = min(1.0, sold / before) if before > 0 else 1.0
-            pos["his_shares"] = max(0.0, before - sold)
-            if pos["his_shares"] < 1e-6:
-                fraction = 1.0  # he's fully out, so are we
+            self.shadow_sell(asset, sold)
+            fraction = self.exit_fraction(self.state["positions"][asset], asset, sold)
             if self.mode == "live":
                 return self.live_sell(asset, fraction)
             bid, _ = self.quote(asset)
@@ -217,6 +243,71 @@ class Bot:
                 return skip(self.state, "no buyers")
             sell(self.state, asset, fraction, bid, "copied sell")
             L.info("SELL %.0f%% of %s @ %.3f", fraction * 100, t.get("title"), bid)
+
+    def price_filter(self, b: dict, his_price: float, delay: int) -> Optional[str]:
+        """Why this copy is too late, too thin, too wide or too expensive to take; None if it's fine."""
+        st = self.settings
+        if delay > float(st.get("max_delay_s", 60)):
+            return f"copy too late (over {int(float(st.get('max_delay_s', 60)))}s)"
+        if b.get("spread") is not None and b["spread"] * 100 > float(st.get("max_spread_cents", 5)) + 1e-9:
+            return "spread too wide"
+        if "ask_shares" in b and b["ask_shares"] * b["ask"] < float(st.get("min_depth_usd", 0)):
+            return "too little liquidity"
+        if not slip_ok(st, his_price, b["ask"]):
+            self.state.setdefault("slip", {"n": 0, "cents": 0.0, "skipped": 0})["skipped"] += 1
+            return "price moved past slippage cap"
+        return None
+
+    def exit_fraction(self, pos: dict, asset: str, sold: float) -> float:
+        """What fraction of a position to sell when he sells `sold` shares: his share of his own stack."""
+        before = pos.get("his_shares")
+        if not before:
+            before = sold + pm.his_position_shares(self.target(), asset)
+        fraction = min(1.0, sold / before) if before > 0 else 1.0
+        pos["his_shares"] = max(0.0, before - sold)
+        return 1.0 if pos["his_shares"] < 1e-6 else fraction  # he's fully out, so are we
+
+    # Shadow book: the same signals copied immediately at whatever the ask is, with no
+    # delay/spread/liquidity/price filters, so the dashboard can compare the two.
+    def shadow(self) -> dict:
+        sh = self.state.get("shadow")
+        if not sh:
+            sh = self.state["shadow"] = new_state(float(self.state["start_bank"]))
+            for k in ("trades", "equity", "log", "cursor", "us", "live_spent_today"):
+                sh.pop(k, None)
+            # Start from where the real book is, so the two only differ by what the filters skip.
+            for k in ("bank", "realized", "wins", "losses", "fees", "positions", "totals"):
+                sh[k] = json.loads(json.dumps(self.state.get(k, sh.get(k))))
+        sh.setdefault("trades", [])
+        return sh
+
+    def _shadow_tidy(self, sh: dict) -> None:
+        sh["trades"] = []
+        del sh.setdefault("closed", [])[:]
+
+    def shadow_buy(self, t: dict, usd: float, ask: float, delay: int, us_slug, long) -> None:
+        sh = self.shadow()
+        asset = str(t["asset"])
+        size = float(t.get("size") or 0)
+        held = sh["positions"].get(asset)
+        if held is not None:
+            held["his_shares"] = held.get("his_shares", 0.0) + size
+        if buy(sh, t, usd, ask, delay, live_us.fee_coefficient(us_slug)) and held is None:
+            pos = sh["positions"][asset]
+            pos.update(us_slug=us_slug, long=long)
+            pos["his_shares"] = max(pm.his_position_shares(self.target(), asset), size)
+        self._shadow_tidy(sh)
+
+    def shadow_sell(self, asset: str, sold: float) -> None:
+        sh = self.shadow()
+        pos = sh["positions"].get(asset)
+        if not pos:
+            return
+        fraction = self.exit_fraction(pos, asset, sold)
+        bid, _ = live_us.quote(pos["us_slug"], pos.get("long", True)) if pos.get("us_slug") else pm.best_prices(asset)
+        if bid is not None:
+            sell(sh, asset, fraction, bid, "copied sell")
+        self._shadow_tidy(sh)
 
     def seed_his_shares(self, pos: dict, his_size: float) -> None:
         """On our first buy of an outcome, note how many shares he holds (including any from before we started)."""
@@ -231,7 +322,8 @@ class Bot:
             return live_us.quote(pos["us_slug"], pos.get("long", True))
         return pm.best_prices(asset)
 
-    def live_buy(self, t: dict, usd: float, us_slug: Optional[str], long: bool, ask: float, delay: int) -> None:
+    def live_buy(self, t: dict, usd: float, us_slug: Optional[str], long: bool, ask: float, delay: int,
+                 meta: Optional[dict] = None) -> None:
         if not us_slug:
             return skip(self.state, "not on Polymarket US")
         day = time.strftime("%Y-%m-%d", time.gmtime())
@@ -252,17 +344,23 @@ class Bot:
         except Exception as exc:
             log(self.state, f"Order failed: {exc}")
             return skip(self.state, "order error")
-        shares, px = live_us.filled(resp)
+        shares, px, reported = live_us.filled(resp)
         if shares <= 0:
-            return skip(self.state, "not filled")
+            return skip(self.state, "not filled (price moved past limit)")
+        partial = shares * limit < usd * 0.99
+        if partial:
+            skip(self.state, "partial fill (book too thin)")
         track_slip(self.state, his_price, px)
         theta = live_us.fee_coefficient(us_slug)
-        fee = taker_fee(shares, px, theta)
+        fee = taker_fee(shares, px, theta) if reported is None else round(reported, 2)
         spent["usd"] += shares * px + fee
         self.state["bank"] = max(self.state["bank"], shares * px + fee)  # the order already filled; record it in full
-        buy(self.state, t, shares * px, px, delay, theta)
+        buy(self.state, t, shares * px, px, delay, theta, fee=fee,
+            meta={**(meta or {}), "fill": "partial" if partial else "full",
+                  "fee_source": "exchange" if reported is not None else "schedule"})
         pos = self.state["positions"][str(t["asset"])]
         pos.update(us=True, us_slug=us_slug, long=long)
+        pos["partial"] = pos.get("partial", 0) + partial
         self.seed_his_shares(pos, float(t.get("size") or 0))
 
     def live_sell(self, asset: str, fraction: float, why: str = "copied sell") -> None:
@@ -276,9 +374,11 @@ class Bot:
         except Exception as exc:
             log(self.state, f"Sell failed: {exc}")
             return skip(self.state, "order error")
-        shares, px = live_us.filled(resp)
-        if shares > 0:
-            sell(self.state, asset, min(1.0, shares / pos["shares"]), px, why)
+        shares, px, reported = live_us.filled(resp)
+        if shares <= 0:
+            return skip(self.state, "sell not filled")
+        sell(self.state, asset, min(1.0, shares / pos["shares"]), px, why,
+             fee=None if reported is None else round(reported, 2))
 
     def halt(self, why: str) -> None:
         log(self.state, why)
@@ -304,6 +404,7 @@ class Bot:
         start = self.state.get("upkeep_at", 0) % max(1, len(assets))
         batch = (assets[start:] + assets[:start])[:UPKEEP_BATCH]
         self.state["upkeep_at"] = start + len(batch)
+        sh = self.shadow()
         for asset in batch:
             pos = self.state["positions"].get(asset)
             if pos is None:
@@ -311,10 +412,29 @@ class Bot:
             res = pm.resolution(asset)
             if res is not None:
                 sell(self.state, asset, 1.0, res, "resolved")
+                if asset in sh["positions"]:
+                    sell(sh, asset, 1.0, res, "resolved")
                 continue
             mid = pm.midpoint(asset)
             if mid is not None:
                 pos["cur"] = mid
+                if asset in sh["positions"]:
+                    sh["positions"][asset]["cur"] = mid
+        # Shadow-only positions (copies the filters turned down) get checked a few per pass.
+        extra = [a for a in sorted(sh["positions"]) if a not in self.state["positions"]]
+        if extra:
+            s0 = sh.get("upkeep_at", 0) % len(extra)
+            part = (extra[s0:] + extra[:s0])[:max(10, UPKEEP_BATCH // 5)]
+            sh["upkeep_at"] = s0 + len(part)
+            for asset in part:
+                res = pm.resolution(asset)
+                if res is not None:
+                    sell(sh, asset, 1.0, res, "resolved")
+                else:
+                    mid = pm.midpoint(asset)
+                    if mid is not None:
+                        sh["positions"][asset]["cur"] = mid
+        self._shadow_tidy(sh)
         self.state["exposure"] = round(exposure(self.state), 2)
         if self.target() and time.time() - getattr(self, "his_stats_at", 0) > 600:
             his = self.state.setdefault("his", {"since": int(time.time()), "buys": 0, "sells": 0, "usd": 0.0})

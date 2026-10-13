@@ -44,14 +44,46 @@ def us_market(slug: str, event_slug: str = "") -> Optional[str]:
 
     US keeps the international event slug but prefixes each market slug with a
     type code (e.g. "atc-" for soccer results, "aec-" for US games), so match on
-    the event, then on the market slug's tail.
+    the event, then on the market slug's tail. More than one candidate means the
+    match is ambiguous, and we'd rather skip than guess.
     """
     if not slug:
         return None
-    for us_slug in _us_event(event_slug):
-        if us_slug == slug or us_slug.endswith("-" + slug):
-            return us_slug
-    return None
+    hits = [u for u in _us_event(event_slug) if u == slug or u.endswith("-" + slug)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def side_for(us_slug: str, outcome: str) -> Optional[bool]:
+    """True/False if the international outcome is the US market's long/short side; None if unsure.
+
+    Yes/No markets map Yes to long. Team markets match the outcome name to exactly
+    one side's name; anything else (no match, or both sides match) is None.
+    """
+    name = str(outcome or "").strip().lower()
+    if not name:
+        return None
+    if name in ("yes", "no"):
+        return name == "yes"
+    sides = _sides(us_slug)
+    exact = [long for names, long in sides if name in names]
+    if len(exact) == 1:
+        return exact[0]
+    loose = [long for names, long in sides if any(name in n or n in name for n in names)]
+    return loose[0] if len(loose) == 1 else None
+
+
+def match(slug: str, event_slug: str, outcome: str) -> Tuple[Optional[str], Optional[bool], str]:
+    """(US slug, is_long, "") for a verified same-event, same-date, same-outcome contract,
+    or (None, None, reason) when there isn't one we're sure of."""
+    us_slug = us_market(slug, event_slug)
+    if not us_slug:
+        return None, None, "not on Polymarket US"
+    if _market(us_slug)[2]:
+        return None, None, "US market closed"
+    long = side_for(us_slug, outcome)
+    if long is None:
+        return None, None, "outcome doesn't match a US side"
+    return us_slug, long, ""
 
 
 def has_keys() -> bool:
@@ -66,12 +98,12 @@ def _client():
 
 @lru_cache(maxsize=2000)
 def _market(us_slug: str) -> tuple:
-    """(sides, fee coefficient) of a Polymarket US market; sides are ((names), is_long) pairs."""
+    """(sides, fee coefficient, closed) of a Polymarket US market; sides are ((names), is_long) pairs."""
     try:
         r = requests.get(f"{GATEWAY}/v1/market/slug/{us_slug}", timeout=15)
         m = (r.json() or {}).get("market") or {} if r.ok else {}
     except (requests.RequestException, ValueError):
-        return (), None
+        return (), None, False
     sides = []
     for side in m.get("marketSides") or []:
         names = {str(side.get("description") or "").lower(), str((side.get("team") or {}).get("name") or "").lower()}
@@ -80,7 +112,8 @@ def _market(us_slug: str) -> tuple:
         theta = float(m["feeCoefficient"])
     except (KeyError, TypeError, ValueError):
         theta = None
-    return tuple(sides), theta
+    closed = bool(m.get("closed")) or m.get("status") not in (None, "MARKET_STATUS_OPEN")
+    return tuple(sides), theta, closed
 
 
 def _sides(us_slug: str) -> tuple:
@@ -95,45 +128,46 @@ def fee_coefficient(us_slug: str) -> float:
 
 
 def is_long(us_slug: str, outcome: str, outcome_index: int) -> bool:
-    """Whether the international outcome we copy is the long (YES) side on Polymarket US.
-
-    US markets are one long and one short side, and their order doesn't always match
-    the international outcome order, so match on the outcome's name first.
-    """
-    name = str(outcome or "").strip().lower()
-    if name in ("yes", "no"):
-        return name == "yes"
-    for names, long in _sides(us_slug):
-        if any(name and (name == n or name in n or n in name) for n in names):
-            return long
-    return int(outcome_index or 0) == 0
+    """Best-effort side for positions opened before strict matching; new copies use match()."""
+    side = side_for(us_slug, outcome)
+    return (int(outcome_index or 0) == 0) if side is None else side
 
 
-def quote(us_slug: str, long: bool) -> Tuple[Optional[float], Optional[float]]:
-    """(best bid, best ask) for one side of a Polymarket US market, from the public gateway.
+def book(us_slug: str, long: bool) -> Optional[dict]:
+    """Top of the Polymarket US book for one side: bid, ask, spread and resting shares at each.
 
-    The book is quoted for the long side; the short side is its mirror image
-    (buying NO at 1 - the best YES bid).
+    The gateway quotes the long side; the short side is its mirror image (buying NO
+    at 1 - the best YES bid, against the shares resting on that bid).
     """
     try:
         r = requests.get(f"{GATEWAY}/v1/markets/{us_slug}/bbo", timeout=10)
         d = (r.json() or {}).get("marketData") or {} if r.ok else {}
     except (requests.RequestException, ValueError):
-        return None, None
+        return None
     if d.get("state") not in (None, "MARKET_STATE_OPEN"):
-        return None, None
+        return None
 
-    def px(key):
+    def num(key, sub=True):
         try:
-            v = float((d.get(key) or {}).get("value"))
+            v = float((d.get(key) or {}).get("value") if sub else d.get(key))
         except (TypeError, ValueError):
             return None
-        return v if 0 < v < 1 else None
+        return v
 
-    bid, ask = px("bestBid"), px("bestAsk")
-    if long:
-        return bid, ask
-    return (round(1 - ask, 4) if ask else None), (round(1 - bid, 4) if bid else None)
+    bid, ask = num("bestBid"), num("bestAsk")
+    bid = bid if bid and 0 < bid < 1 else None
+    ask = ask if ask and 0 < ask < 1 else None
+    bid_sh, ask_sh = num("bidShares", False) or 0.0, num("askShares", False) or 0.0
+    if not long:
+        bid, ask, bid_sh, ask_sh = (round(1 - ask, 4) if ask else None), (round(1 - bid, 4) if bid else None), ask_sh, bid_sh
+    spread = round(ask - bid, 4) if bid is not None and ask is not None else None
+    return {"bid": bid, "ask": ask, "bid_shares": bid_sh, "ask_shares": ask_sh, "spread": spread}
+
+
+def quote(us_slug: str, long: bool) -> Tuple[Optional[float], Optional[float]]:
+    """(best bid, best ask) for one side of a Polymarket US market."""
+    b = book(us_slug, long)
+    return (b["bid"], b["ask"]) if b else (None, None)
 
 
 def place(slug: str, long: bool, action: str, qty: float, limit: float) -> dict:
@@ -158,8 +192,13 @@ def place(slug: str, long: bool, action: str, qty: float, limit: float) -> dict:
 
 
 def filled(resp: dict) -> tuple:
-    """(shares, average price) actually executed from an order response."""
+    """(shares, average price, fee or None) actually executed from an order response.
+
+    The fee is what the exchange reported on the executions, when it reports one;
+    None means the caller should fall back to the published fee schedule.
+    """
     shares = cost = 0.0
+    fee = None
     for ex in (resp or {}).get("executions") or []:
         try:
             q = float(ex.get("lastShares") or 0)
@@ -168,7 +207,14 @@ def filled(resp: dict) -> tuple:
             continue
         shares += q
         cost += q * px
-    return shares, (cost / shares if shares else 0.0)
+        f = ex.get("fee") or ex.get("commission")
+        if isinstance(f, dict):
+            f = f.get("value")
+        try:
+            fee = (fee or 0.0) + abs(float(f)) if f is not None else fee
+        except (TypeError, ValueError):
+            pass
+    return shares, (cost / shares if shares else 0.0), fee
 
 
 def balance() -> Optional[float]:

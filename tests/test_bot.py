@@ -16,8 +16,13 @@ import pytest  # noqa: E402
 def offline_us_book(monkeypatch):
     # Tests price US markets off the same fake book as international ones, and allow
     # the 2-cent gap between his 0.40 and the 0.42 ask unless a test says otherwise.
+    def fake_book(slug, long):
+        bid, ask = pm.best_prices(slug)
+        return {"bid": bid, "ask": ask, "bid_shares": 1e4, "ask_shares": 1e4,
+                "spread": round(ask - bid, 4) if bid and ask else None}
+    monkeypatch.setattr(live_us, "book", fake_book)
     monkeypatch.setattr(live_us, "quote", lambda slug, long: pm.best_prices(slug))
-    monkeypatch.setattr(live_us, "_market", lambda slug: ((), None))
+    monkeypatch.setattr(live_us, "_market", lambda slug: ((), None, False))
     monkeypatch.setattr(pm, "his_position_shares", lambda w, a: 0.0)
     monkeypatch.setitem(DEFAULT_SETTINGS, "max_slip_cents", 5.0)
 
@@ -122,8 +127,10 @@ def test_kill_switch_and_target_change(tmp_path, monkeypatch):
 def test_order_fill_parsing():
     resp = {"executions": [{"lastShares": "10", "lastPx": {"value": "0.40"}},
                            {"lastShares": "5", "lastPx": {"value": "0.43"}}]}
-    shares, px = live_us.filled(resp)
-    assert shares == 15 and abs(px - 0.41) < 1e-9
+    shares, px, fee = live_us.filled(resp)
+    assert shares == 15 and abs(px - 0.41) < 1e-9 and fee is None
+    resp["executions"][0]["fee"] = {"value": "0.17"}
+    assert live_us.filled(resp)[2] == 0.17          # exchange-reported fee wins when present
 
 
 def test_us_only_skips_markets_missing_on_polymarket_us(tmp_path, monkeypatch):
@@ -214,3 +221,85 @@ def test_exits_follow_his_share_of_stack_even_when_halted(tmp_path, monkeypatch)
     assert abs(bot.state["positions"]["A"]["shares"] - ours / 2) < 1e-9
     bot.copy(dict(TRADE, side="SELL", size=300), 1)  # the rest: we're out too
     assert "A" not in bot.state["positions"]
+
+
+def test_market_matching_rejects_ambiguous_and_mismatched(monkeypatch):
+    monkeypatch.setattr(live_us, "_us_event", lambda ev: ("aec-mlb-lad-mil-2026-10-12",))
+    teams = ((("los angeles dodgers",), True), (("milwaukee brewers",), False))
+    monkeypatch.setattr(live_us, "_market", lambda slug: (teams, 0.0695, False))
+    assert live_us.match("mlb-lad-mil-2026-10-12", "mlb-lad-mil-2026-10-12", "Milwaukee Brewers") == \
+        ("aec-mlb-lad-mil-2026-10-12", False, "")
+    # An outcome that names neither side, or both, is refused rather than guessed.
+    assert live_us.match("mlb-lad-mil-2026-10-12", "mlb-lad-mil-2026-10-12", "Over 8.5")[2] == \
+        "outcome doesn't match a US side"
+    monkeypatch.setattr(live_us, "_market", lambda slug: (((("brewers",), True), (("brewers b",), False)), 0.0695, False))
+    assert live_us.side_for("x", "brewers b") is False  # exact name wins over a looser match
+    monkeypatch.setattr(live_us, "_market", lambda slug: (((("milwaukee",), True), (("milwaukee b",), False)), 0.0695, False))
+    assert live_us.side_for("x", "milwaukee brewers") is None
+    # Two US contracts ending in the same slug: ambiguous.
+    monkeypatch.setattr(live_us, "_us_event", lambda ev: ("aec-x-1", "cpic-x-1"))
+    assert live_us.us_market("x-1", "x") is None
+    monkeypatch.setattr(live_us, "_us_event", lambda ev: ("aec-x-1",))
+    monkeypatch.setattr(live_us, "_market", lambda slug: (teams, 0.0695, True))
+    assert live_us.match("x-1", "x", "Yes")[2] == "US market closed"
+
+
+def _bot(tmp_path, monkeypatch, ask=0.42, depth=1e4, bid=0.40):
+    monkeypatch.setattr(live_us, "us_market", lambda slug, event="": "atc-" + slug)
+    monkeypatch.setattr(pm, "best_prices", lambda a: (bid, ask))
+    monkeypatch.setattr(live_us, "book", lambda slug, long: {"bid": bid, "ask": ask, "bid_shares": depth,
+                                                             "ask_shares": depth, "spread": round(ask - bid, 4)})
+    return main.Bot(LocalStore(str(tmp_path)))
+
+
+def test_copy_filters_explain_skips(tmp_path, monkeypatch):
+    bot = _bot(tmp_path, monkeypatch, ask=0.42, bid=0.30)       # 12c spread
+    bot.copy(dict(TRADE), 5)
+    bot.settings["max_spread_cents"] = 20
+    bot.copy(dict(TRADE, transactionHash="0x2"), 300)            # five minutes late
+    bot.settings["min_depth_usd"] = 10_000
+    bot.copy(dict(TRADE, transactionHash="0x3"), 5)
+    assert bot.state["skipped"] == {"spread too wide": 1, "copy too late (over 60s)": 1, "too little liquidity": 1}
+    assert not bot.state["positions"]
+    # The shadow book took all three at the ask, so the dashboard can compare.
+    assert len(bot.state["shadow"]["positions"]) == 1 and bot.state["shadow"]["totals"]["gross_in"] == 3
+
+
+def test_thin_book_gives_partial_fill(tmp_path, monkeypatch):
+    bot = _bot(tmp_path, monkeypatch, depth=60)                 # 60 shares at 42c = $25.20 on offer
+    bot.settings.update(size_mode="5", min_depth_usd=0)
+    bot.copy(dict(TRADE), 2)
+    bot.settings["size_mode"] = "prop"; bot.settings["prop_pct"] = 10   # $40 wanted
+    bot.copy(dict(TRADE, transactionHash="0x2"), 2)
+    pos = bot.state["positions"]["A"]
+    assert abs(pos["gross_in"] - (5 + 60 * 0.42)) < 1e-9 and pos["partial"] == 1
+    assert bot.state["trades"][0]["fill"] == "partial" and bot.state["trades"][0]["dst"] == "atc-will-x"
+    assert bot.state["trades"][0]["src"] == "A" and bot.state["trades"][0]["ask"] == 0.42
+
+
+def test_closed_ledger_splits_gross_fees_and_slippage(tmp_path, monkeypatch):
+    bot = _bot(tmp_path, monkeypatch, ask=0.42, bid=0.41)
+    bot.copy(dict(TRADE), 4)                                     # $1 at 42c, he paid 40c
+    bot.copy(dict(TRADE, side="SELL", size=1000, transactionHash="0x2"), 4)   # he sells everything
+    row = bot.state["closed"][0]
+    shares = 1 / 0.42
+    assert row["fees_in"] == taker_fee(shares, 0.42) and row["fees_out"] == taker_fee(shares, 0.41)
+    assert abs(row["slip"] - shares * 0.02) < 1e-4 and row["exit"] == "copied sell"
+    assert abs(row["gross"] - (shares * 0.41 - 1)) < 1e-4
+    assert abs(row["net"] - (row["gross"] - row["fees_in"] - row["fees_out"])) < 1e-4
+    t = bot.state["totals"]
+    assert abs(t["gross_out"] - t["gross_in"] - t["fees_in"] - t["fees_out"] - bot.state["realized"]) < 1e-6
+
+
+def test_partial_exits_and_settlement(tmp_path, monkeypatch):
+    bot = _bot(tmp_path, monkeypatch, ask=0.40, bid=0.40)
+    bot.copy(dict(TRADE, size=1000), 1)
+    bot.copy(dict(TRADE, side="SELL", size=250, transactionHash="0x2"), 1)   # a quarter of his 1000
+    shares = 1 / 0.40
+    assert abs(bot.state["positions"]["A"]["shares"] - shares * 0.75) < 1e-9 and not bot.state["closed"]
+    monkeypatch.setattr(pm, "resolution", lambda a: 1.0)
+    monkeypatch.setattr(pm, "leaderboard_pnl", lambda w: {})
+    bot.upkeep()
+    row = bot.state["closed"][0]
+    assert row["exit"] == "resolved" and bot.state["totals"]["settled"] > 0
+    assert bot.state["shadow"]["wins"] == 1 and not bot.state["shadow"]["positions"]

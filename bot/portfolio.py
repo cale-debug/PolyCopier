@@ -12,6 +12,7 @@ from decimal import ROUND_HALF_EVEN, Decimal
 from typing import Optional
 
 MAX_TRADES_KEPT = 400
+MAX_CLOSED_KEPT = 500
 MAX_EQUITY_POINTS = 3000
 TAKER_FEE = 0.0695  # Polymarket US standard taker fee coefficient (docs.polymarket.us/fees)
 
@@ -26,6 +27,9 @@ DEFAULT_SETTINGS = {
     "skip_both_sides": False,  # True: don't buy the other side of a market we already hold
     "copy_sells": True,
     "max_slip_cents": 1.0,     # skip a buy if we'd pay more than this many cents above his price
+    "max_delay_s": 60,         # skip a buy we only see this many seconds after he made it
+    "max_spread_cents": 5.0,   # skip when the US book's bid/ask spread is wider than this
+    "min_depth_usd": 20.0,     # skip when less than this many dollars are offered at the best ask
     "halted": False,
     "kill": False,             # one-shot: sell everything, then halt
     "mode": "paper",           # "paper" | "live"
@@ -57,6 +61,8 @@ def new_state(bank: float) -> dict:
         "live_spent_today": {"day": "", "usd": 0.0},
         "log": [],
         "fees": 0.0,
+        "closed": [],            # one row per fully closed position, newest first, with its costs
+        "totals": {},            # running cost breakdown; see add_total()
         "slip": {"n": 0, "cents": 0.0, "skipped": 0},  # our buy price vs his, in cents
     }
 
@@ -101,6 +107,20 @@ def track_slip(state: dict, his_price: float, our_price: float) -> None:
     sl["cents"] = round(sl["cents"] + (our_price - his_price) * 100, 3)
 
 
+def category(trade: dict) -> str:
+    """Rough market category from the slug's league prefix (mlb, nfl, epl, ...)."""
+    slug = str(trade.get("eventSlug") or trade.get("slug") or "")
+    return slug.split("-")[0] or "other"
+
+
+def add_total(state: dict, **amounts) -> None:
+    """Running totals: gross_in (spent on contracts), gross_out (sale/settlement value),
+    settled (settlement value), fees_in, fees_out, slip (dollars paid above his price)."""
+    t = state.setdefault("totals", {})
+    for k, v in amounts.items():
+        t[k] = round(t.get(k, 0.0) + v, 6)
+
+
 def skip(state: dict, reason: str) -> None:
     state["skipped"][reason] = state["skipped"].get(reason, 0) + 1
     logging.getLogger("bot").info("skip: %s", reason)
@@ -113,35 +133,46 @@ def _record(state: dict, **row) -> None:
 
 
 def buy(state: dict, trade: dict, usd: float, price: float, delay: int,
-        theta: float = TAKER_FEE) -> Optional[dict]:
-    """Spend `usd` on contracts at `price`, plus the taker fee. Returns the fill or None."""
+        theta: float = TAKER_FEE, fee: Optional[float] = None, meta: Optional[dict] = None) -> Optional[dict]:
+    """Spend `usd` on contracts at `price`, plus the taker fee. Returns the fill or None.
+
+    `fee` is the exchange-reported fee when we have one; otherwise the published
+    schedule is used. `meta` (source/destination ids, book snapshot) goes on the fill.
+    """
     if not 0 < price < 1:
         skip(state, "bad price")
         return None
-    fee = taker_fee(usd / price, price, theta)
-    usd = min(usd, state["bank"] - fee)
+    est = taker_fee(usd / price, price, theta) if fee is None else fee
+    usd = min(usd, state["bank"] - est)
     if usd < 0.01:
         skip(state, "no cash")
         return None
     shares = usd / price
-    fee = taker_fee(shares, price, theta)
+    if fee is None:
+        fee = taker_fee(shares, price, theta)
     asset = trade["asset"]
+    his_price = float(trade.get("price") or 0)
     pos = state["positions"].get(asset) or {
         "asset": asset, "title": trade.get("title", ""), "outcome": trade.get("outcome", ""),
         "slug": trade.get("slug", ""), "condition_id": trade.get("conditionId", ""),
-        "shares": 0.0, "cost": 0.0, "opened_at": int(time.time()),
+        "category": category(trade), "shares": 0.0, "cost": 0.0, "opened_at": int(time.time()),
     }
     pos["shares"] += shares
     pos["cost"] += usd + fee  # fees are part of what the position cost us
     pos["avg"] = pos["cost"] / pos["shares"]
     pos.setdefault("cur", price)
     pos["theta"] = theta
+    slip = shares * (price - his_price) if his_price else 0.0
+    for k, v in (("gross_in", usd), ("fees_in", fee), ("slip", slip), ("delay_sum", delay), ("fills", 1)):
+        pos[k] = pos.get(k, 0.0) + v
     state["positions"][asset] = pos
     state["bank"] -= usd + fee
     state["fees"] = round(state.get("fees", 0.0) + fee, 2)
+    add_total(state, gross_in=usd, fees_in=fee, slip=slip)
     fill = {"side": "BUY", "title": pos["title"], "outcome": pos["outcome"], "price": round(price, 4),
             "usd": round(usd, 2), "fee": fee, "shares": round(shares, 4), "his_price": trade.get("price"),
-            "his_usd": round(float(trade.get("usdcSize") or 0), 2), "delay": delay}
+            "his_usd": round(float(trade.get("usdcSize") or 0), 2), "his_ts": trade.get("timestamp"),
+            "delay": delay, **(meta or {})}
     _record(state, **fill)
     return fill
 
@@ -160,11 +191,15 @@ def sell(state: dict, asset: str, fraction: float, price: float, why: str,
     cost = pos["cost"] * fraction
     if fee is None:
         fee = 0.0 if why == "resolved" else taker_fee(shares, price, pos.get("theta", TAKER_FEE))
-    proceeds = shares * price - fee
+    gross = shares * price
+    proceeds = gross - fee
     state["fees"] = round(state.get("fees", 0.0) + fee, 2)
+    add_total(state, gross_out=gross, fees_out=fee, **({"settled": gross} if why == "resolved" else {}))
     pnl = proceeds - cost
     pos["shares"] -= shares
     pos["cost"] -= cost
+    pos["gross_out"] = pos.get("gross_out", 0.0) + gross
+    pos["fees_out"] = pos.get("fees_out", 0.0) + fee
     state["bank"] += proceeds
     state["realized"] += pnl
     if pos["shares"] < 1e-6:
@@ -175,6 +210,7 @@ def sell(state: dict, asset: str, fraction: float, price: float, why: str,
             state["wins"] += 1
         else:
             state["losses"] += 1
+        _close(state, pos, total, why)
     else:
         pos["closed_pnl"] = pos.get("closed_pnl", 0.0) + pnl
     fill = {"side": "SELL" if why != "resolved" else "SETTLE", "title": pos["title"], "outcome": pos["outcome"],
@@ -182,6 +218,23 @@ def sell(state: dict, asset: str, fraction: float, price: float, why: str,
             "pnl": round(pnl, 2), "note": why}
     _record(state, **fill)
     return fill
+
+
+def _close(state: dict, pos: dict, net: float, why: str) -> None:
+    """Ledger row for a fully closed position: what it cost, every fee, slippage, and net result."""
+    fills = int(pos.get("fills", 0)) or 1
+    row = {
+        "title": pos["title"], "outcome": pos["outcome"], "category": pos.get("category", "other"),
+        "src": pos["asset"], "dst": pos.get("us_slug"), "opened": pos.get("opened_at"), "closed": int(time.time()),
+        "gross_in": round(pos.get("gross_in", 0.0), 4), "gross_out": round(pos.get("gross_out", 0.0), 4),
+        "fees_in": round(pos.get("fees_in", 0.0), 2), "fees_out": round(pos.get("fees_out", 0.0), 2),
+        "slip": round(pos.get("slip", 0.0), 4), "delay": round(pos.get("delay_sum", 0.0) / fills, 1),
+        "fills": fills, "partial": pos.get("partial", 0), "net": round(net, 4), "exit": why,
+    }
+    row["gross"] = round(row["gross_out"] - row["gross_in"], 4)
+    closed = state.setdefault("closed", [])
+    closed.insert(0, row)
+    del closed[MAX_CLOSED_KEPT:]
 
 
 def exposure(state: dict) -> float:
