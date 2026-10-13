@@ -334,3 +334,54 @@ def test_older_position_without_side_settles_on_its_own_side(tmp_path, monkeypat
     monkeypatch.setattr(pm, "leaderboard_pnl", lambda w: {})
     bot.upkeep()
     assert bot.state["wins"] == 1 and bot.state["realized"] > 0
+
+
+def test_live_switch_falls_back_to_paper_with_a_reason(tmp_path, monkeypatch):
+    store = LocalStore(str(tmp_path))
+    store.write("settings.json", {**DEFAULT_SETTINGS, "mode": "live"}, "")
+    monkeypatch.setattr(live_us, "has_keys", lambda: True)
+    monkeypatch.setattr(live_us, "account", lambda: None)              # keys rejected
+    bot = main.Bot(store)
+    assert bot.mode == "paper" and "didn't accept" in bot.live_error
+    monkeypatch.setattr(live_us, "account", lambda: {"cash": 250.0, "buying_power": 240.0,
+                                                     "positions_value": 10.0, "open_orders": 0.0})
+    monkeypatch.setattr(live_us, "positions", lambda: {})
+    bot2 = main.Bot(LocalStore(str(tmp_path)))
+    assert bot2.mode == "live" and bot2.state["bank"] == 240.0 and bot2.state["start_bank"] == 250.0
+
+
+def test_live_sync_takes_cash_and_shares_from_the_account(tmp_path, monkeypatch):
+    store = LocalStore(str(tmp_path))
+    store.write("settings.json", {**DEFAULT_SETTINGS, "mode": "live"}, "")
+    monkeypatch.setattr(live_us, "has_keys", lambda: True)
+    acct = {"cash": 100.0, "buying_power": 100.0, "positions_value": 0.0, "open_orders": 0.0}
+    monkeypatch.setattr(live_us, "account", lambda: dict(acct))
+    bot = _bot(tmp_path, monkeypatch)
+    bot.store, bot.settings = store, bot.load_settings()
+    bot.mode = bot.effective_mode()
+    bot.state = bot.load_state()
+    st = bot.state
+    buy(st, dict(TRADE, asset="A"), 5, 0.40, 1)
+    st["positions"]["A"].update(us_slug="aec-a", long=True)
+    buy(st, dict(TRADE, asset="B", title="Other"), 5, 0.40, 1)
+    st["positions"]["B"].update(us_slug="aec-b", long=True)
+    acct["buying_power"] = 300.0                                      # he deposited $200
+    monkeypatch.setattr(live_us, "positions", lambda: {
+        "aec-a": {"qty": 10.0, "cost": 4, "realized": 0, "value": 0, "outcome": "", "title": "", "expired": False},
+        "aec-x": {"qty": 3.0, "cost": 1, "realized": 0, "value": 0, "outcome": "Yes", "title": "Manual bet", "expired": False}})
+    bot.sync_account()
+    assert st["bank"] == 300.0
+    assert st["positions"]["A"]["shares"] == 10.0                      # account had fewer than we thought
+    assert "B" not in st["positions"]                                  # sold outside the bot
+    assert [o["slug"] for o in st["account"]["outside"]] == ["aec-x"]
+
+
+def test_orders_round_to_tick_in_our_favour(monkeypatch):
+    monkeypatch.setattr(live_us, "_market_raw", lambda slug: {"orderPriceMinTickSize": 0.01, "minimumTradeQty": 1})
+    assert live_us._round_order("m", "BUY", 2.7, 0.4689) == (2.0, 0.46)
+    assert live_us._round_order("m", "SELL", 2.0, 0.4611) == (2.0, 0.47)
+    resp = {"executions": [{"type": "EXECUTION_TYPE_REJECTED", "orderRejectReason": "INSUFFICIENT_FUNDS"}]}
+    assert live_us.rejection(resp) == "INSUFFICIENT_FUNDS" and live_us.filled(resp)[0] == 0
+    fill = {"executions": [{"lastShares": "2", "lastPx": {"value": "0.46"},
+                            "commissionNotionalCollected": {"value": "0.03", "currency": "USD"}}]}
+    assert live_us.filled(fill)[2] == 0.03

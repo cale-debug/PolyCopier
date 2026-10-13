@@ -97,12 +97,33 @@ def _client():
 
 
 @lru_cache(maxsize=2000)
-def _market(us_slug: str) -> tuple:
-    """(sides, fee coefficient, closed) of a Polymarket US market; sides are ((names), is_long) pairs."""
+def _market_raw(us_slug: str) -> dict:
     try:
         r = requests.get(f"{GATEWAY}/v1/market/slug/{us_slug}", timeout=15)
-        m = (r.json() or {}).get("market") or {} if r.ok else {}
+        return (r.json() or {}).get("market") or {} if r.ok else {}
     except (requests.RequestException, ValueError):
+        return {}
+
+
+def order_rules(us_slug: str) -> Tuple[float, float]:
+    """(price tick, minimum quantity) for orders on this market."""
+    m = _market_raw(us_slug)
+    try:
+        tick = float(m.get("orderPriceMinTickSize") or 0.001)
+    except (TypeError, ValueError):
+        tick = 0.001
+    try:
+        min_qty = float(m.get("minimumTradeQty") or 1)
+    except (TypeError, ValueError):
+        min_qty = 1.0
+    return tick, min_qty
+
+
+@lru_cache(maxsize=2000)
+def _market(us_slug: str) -> tuple:
+    """(sides, fee coefficient, closed) of a Polymarket US market; sides are ((names), is_long) pairs."""
+    m = _market_raw(us_slug)
+    if not m:
         return (), None, False
     sides = []
     for side in m.get("marketSides") or []:
@@ -193,15 +214,31 @@ def quote(us_slug: str, long: bool) -> Tuple[Optional[float], Optional[float]]:
     return (b["bid"], b["ask"]) if b else (None, None)
 
 
+def _round_order(us_slug: str, action: str, qty: float, limit: float) -> Tuple[float, float]:
+    """Round to the market's tick and lot size, always in our favour: a buy limit
+    rounds down and a sell limit rounds up, so we never pay past the cap."""
+    import math
+    tick, min_qty = order_rules(us_slug)
+    steps = limit / tick
+    steps = math.floor(steps + 1e-9) if action == "BUY" else math.ceil(steps - 1e-9)
+    limit = min(1 - tick, max(tick, steps * tick))
+    lot = min_qty if min_qty >= 1 else 0.01
+    qty = math.floor(qty / lot + 1e-9) * lot
+    return round(qty, 2), round(limit, 6)
+
+
 def place(slug: str, long: bool, action: str, qty: float, limit: float) -> dict:
     """Immediate-or-cancel limit order: fills at `limit` or better, or not at all."""
+    qty, limit = _round_order(slug, action, qty, limit)
+    if qty <= 0:
+        return {"executions": [], "skipped": "order smaller than the market's minimum size"}
     order = {
         "marketSlug": slug,
         "type": "ORDER_TYPE_LIMIT",
         "outcomeSide": "OUTCOME_SIDE_YES" if long else "OUTCOME_SIDE_NO",
         "action": "ORDER_ACTION_BUY" if action == "BUY" else "ORDER_ACTION_SELL",
-        "price": {"value": f"{limit:.3f}", "currency": "USD"},
-        "quantity": round(qty, 2),
+        "price": {"value": f"{limit:.4f}", "currency": "USD"},
+        "quantity": qty,
         "tif": "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
         "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_AUTOMATIC",
         "synchronousExecution": True,
@@ -212,6 +249,16 @@ def place(slug: str, long: bool, action: str, qty: float, limit: float) -> dict:
         return client.orders.create(order)
     finally:
         client.close()
+
+
+def rejection(resp: dict) -> Optional[str]:
+    """The exchange's reason when an order was rejected, if it gave one."""
+    if (resp or {}).get("skipped"):
+        return resp["skipped"]
+    for ex in (resp or {}).get("executions") or []:
+        if ex.get("type") == "EXECUTION_TYPE_REJECTED":
+            return str(ex.get("orderRejectReason") or ex.get("text") or "rejected")
+    return None
 
 
 def filled(resp: dict) -> tuple:
@@ -230,7 +277,7 @@ def filled(resp: dict) -> tuple:
             continue
         shares += q
         cost += q * px
-        f = ex.get("fee") or ex.get("commission")
+        f = ex.get("commissionNotionalCollected") or ex.get("fee") or ex.get("commission")
         if isinstance(f, dict):
             f = f.get("value")
         try:
@@ -240,14 +287,58 @@ def filled(resp: dict) -> tuple:
     return shares, (cost / shares if shares else 0.0), fee
 
 
-def balance() -> Optional[float]:
+def _amt(x) -> float:
+    try:
+        return float((x or {}).get("value") if isinstance(x, dict) else x)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def account() -> Optional[dict]:
+    """Cash and buying power straight from the Polymarket US account, or None if unreachable."""
     client = _client()
     try:
         b = client.account.balances()
         rows = b.get("balances") or [b]
-        return float(rows[0].get("buyingPower") or rows[0].get("currentBalance") or 0)
+        row = next((r for r in rows if r.get("currency") in (None, "USD")), rows[0])
+        return {"cash": _amt(row.get("currentBalance")), "buying_power": _amt(row.get("buyingPower")),
+                "positions_value": _amt(row.get("assetNotional")), "open_orders": _amt(row.get("openOrders"))}
     except Exception as exc:
         log.warning("Balance check failed: %s", exc)
+        return None
+    finally:
+        client.close()
+
+
+def balance() -> Optional[float]:
+    a = account()
+    return a["buying_power"] if a else None
+
+
+def positions() -> Optional[dict]:
+    """{US market slug: {"qty", "cost", "realized", "value", "outcome", "title", "expired"}} for the account."""
+    client = _client()
+    out, cursor = {}, None
+    try:
+        for page in range(50):
+            try:
+                resp = client.portfolio.positions(**({"cursor": cursor} if cursor else {}))
+            except TypeError:
+                if page == 0:
+                    raise
+                break  # SDK without paging: the first page is what we get
+            for slug, p in (resp.get("positions") or {}).items():
+                meta = p.get("marketMetadata") or {}
+                out[slug] = {"qty": abs(_amt(p.get("netPositionDecimal") or p.get("netPosition"))),
+                             "cost": _amt(p.get("cost")), "realized": _amt(p.get("realized")),
+                             "value": _amt(p.get("cashValue")), "outcome": meta.get("outcome", ""),
+                             "title": meta.get("title", ""), "expired": bool(p.get("expired"))}
+            cursor = resp.get("nextCursor")
+            if resp.get("eof") or not cursor:
+                break
+        return out
+    except Exception as exc:
+        log.warning("Positions check failed: %s", exc)
         return None
     finally:
         client.close()

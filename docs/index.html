@@ -108,6 +108,7 @@ ol { padding-left: 20px; line-height: 1.6; } a { color: var(--neon); }
       <canvas id="eq" height="120"></canvas>
       <div class="hint" id="usline"></div>
       <div class="hint" id="slipline"></div>
+      <div class="hint" id="acctline"></div>
     </div>
 
     <div class="panel">
@@ -334,7 +335,6 @@ function renderSettings() {
   if (document.activeElement !== $("fSpread")) $("fSpread").value = settings.max_spread_cents ?? 5;
   if (document.activeElement !== $("fDepth")) $("fDepth").value = settings.min_depth_usd ?? 20;
   if (document.activeElement !== $("maxDd")) $("maxDd").value = settings.max_drawdown_pct ?? 25;
-  $("liveStatus").textContent = settings.mode === "live" ? "Live mode is ON." : "Paper mode. Nothing real is being bought.";
 }
 
 function slip(t) {
@@ -437,8 +437,15 @@ function renderState() {
   $("hisline").textContent = his.since ? `> his record since we started copying: ${his.buys} buys · ${his.sells} sells · ${usd(his.usd)} traded · P&L ${sgn(hp.since_copy)}  |  today ${sgn(hp.day)} · month ${sgn(hp.month)} · all-time ${sgn(hp.all)}` : "";
   drawEquity(state.equity || []);
   renderReport();
-  $("modebar").textContent = live ? "LIVE MODE // REAL MONEY" : "PAPER MODE // NO REAL MONEY";
+  const wantLive = settings && settings.mode === "live";
+  $("modebar").textContent = live ? "LIVE MODE // REAL MONEY" : wantLive ? "LIVE REQUESTED // STILL PAPER: " + (state.live_error || "starting up") : "PAPER MODE // NO REAL MONEY";
   $("modebar").classList.toggle("live", live);
+  $("modebar").classList.toggle("warn", !live && wantLive);
+  const a = state.account;
+  $("acctline").innerHTML = live && a ? `Polymarket US account: cash ${usd(a.cash)} · buying power ${usd(a.buying_power)} · positions ${usd(a.positions_value)} · synced ${ago(a.synced_at)} ago` +
+    ((a.outside || []).length ? `<br>Not placed by the bot (left alone): ${a.outside.map((o) => esc(o.title || o.slug) + " " + o.qty).join(", ")}` : "") : "";
+  $("liveStatus").textContent = live ? `Live mode is ON. Synced with your Polymarket US account ${a ? ago(a.synced_at) + " ago" : "soon"}.`
+    : wantLive ? "Live requested but still on paper: " + (state.live_error || "the bot is restarting.") : "Paper mode. Nothing real is being bought.";
 }
 
 function drawEquity(pts) {

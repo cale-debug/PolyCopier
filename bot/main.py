@@ -50,10 +50,18 @@ class Bot:
         return {**DEFAULT_SETTINGS, **s}
 
     def effective_mode(self) -> str:
+        """Live only when asked for AND the keys reach a real account; otherwise paper, with the reason saved."""
+        self.live_error = ""
         if self.settings.get("mode") == "live":
-            if live_us.has_keys():
+            if getattr(self, "mode", None) == "live" and live_us.has_keys():
+                return "live"  # already checked the account when we switched
+            if not live_us.has_keys():
+                self.live_error = "No Polymarket US keys saved yet (GO LIVE tab)."
+            elif live_us.account() is None:
+                self.live_error = "Polymarket US didn't accept the keys, or couldn't be reached. Still on paper."
+            else:
                 return "live"
-            L.warning("Live mode requested but no Polymarket US keys in secrets; staying on paper")
+            L.warning("Live mode requested but unavailable: %s", self.live_error)
         return "paper"
 
     def state_path(self) -> str:
@@ -64,8 +72,13 @@ class Bot:
         if st is None:
             bank = float(self.settings["paper_start_bank"])
             if self.mode == "live":
-                bank = live_us.balance() or 0.0
+                acct = live_us.account() or {}
+                bank = acct.get("buying_power", 0.0)
             st = new_state(bank)
+            if self.mode == "live":
+                # P&L is measured from the whole account as it was at go-live, cash plus anything held.
+                st["start_bank"] = round(bank + acct.get("positions_value", 0.0), 2)
+                st["account"] = {**acct, "synced_at": int(time.time())}
         if "fees" not in st:
             # Positions opened before fees were tracked: charge the buy fee they would have paid.
             st["fees"] = 0.0
@@ -93,6 +106,7 @@ class Bot:
 
     def save(self, why: str = "Update state") -> None:
         self.state["heartbeat"] = int(time.time())
+        self.state["live_error"] = getattr(self, "live_error", "")
         self.state["settings_seen"] = self.settings
         mark(self.state)
         self.store.write(self.state_path(), self.state, why)
@@ -334,6 +348,8 @@ class Bot:
         usd = min(usd, float(self.settings["live_max_trade"]))
         if spent["usd"] + usd > float(self.settings["live_daily_cap"]):
             return skip(self.state, "daily cap reached")
+        if usd * 1.05 > self.state["bank"]:
+            return skip(self.state, "not enough cash in account")
         his_price = float(t["price"])
         cap = self.settings.get("max_slip_cents")
         # The limit is the most we'll pay: his price plus the slippage cap. IOC means
@@ -347,6 +363,10 @@ class Bot:
             return skip(self.state, "order error")
         shares, px, reported = live_us.filled(resp)
         if shares <= 0:
+            why = live_us.rejection(resp)
+            if why:
+                log(self.state, f"Order rejected: {why}")
+                return skip(self.state, "order rejected")
             return skip(self.state, "not filled (price moved past limit)")
         partial = shares * limit < usd * 0.99
         if partial:
@@ -428,6 +448,37 @@ class Bot:
                 return res
         return pm.resolution(asset)
 
+    def sync_account(self) -> None:
+        """Live mode: take cash and positions from the Polymarket US account itself, so the
+        dashboard matches the account even after deposits, withdrawals or outside trades."""
+        acct = live_us.account()
+        if acct is None:
+            return log(self.state, "Couldn't reach the Polymarket US account to sync")
+        acct["synced_at"] = int(time.time())
+        held = live_us.positions()
+        if held is not None:
+            ours = {p["us_slug"]: a for a, p in self.state["positions"].items() if p.get("us_slug")}
+            for slug, a in ours.items():
+                pos, real = self.state["positions"][a], held.get(slug)
+                qty = real["qty"] if real else 0.0
+                if real and real["expired"]:
+                    continue  # settled; upkeep books the result
+                if abs(qty - pos["shares"]) > max(0.01, 0.01 * pos["shares"]):
+                    if qty <= 0:
+                        # Gone from the account (sold in the app, or never really filled).
+                        log(self.state, f"{pos['title']}: no longer in the account; closing it here")
+                        bid, _ = self.quote(a)
+                        sell(self.state, a, 1.0, bid or pos.get("cur", 0.0), "closed outside bot", fee=0.0)
+                    else:
+                        log(self.state, f"{pos['title']}: account holds {qty:.2f} shares, bot had {pos['shares']:.2f}; using the account's")
+                        pos["cost"] *= qty / pos["shares"]
+                        pos["shares"] = qty
+                        pos["avg"] = pos["cost"] / qty
+            acct["outside"] = [{"slug": s2, **r} for s2, r in held.items() if s2 not in ours and r["qty"] > 0]
+        # Last, so the account's own cash figure wins over anything booked above.
+        self.state["bank"] = acct["buying_power"]
+        self.state["account"] = acct
+
     def upkeep(self) -> None:
         # Price-check a slice of positions each pass so thousands of them don't stall the loop.
         assets = sorted(self.state["positions"])
@@ -466,6 +517,8 @@ class Bot:
                         sh["positions"][asset]["cur"] = mid
         self._shadow_tidy(sh)
         self.state["exposure"] = round(exposure(self.state), 2)
+        if self.mode == "live":
+            self.sync_account()
         if self.target() and time.time() - getattr(self, "his_stats_at", 0) > 600:
             his = self.state.setdefault("his", {"since": int(time.time()), "buys": 0, "sells": 0, "usd": 0.0})
             pnl = pm.leaderboard_pnl(self.target())
