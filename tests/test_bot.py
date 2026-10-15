@@ -183,6 +183,22 @@ def test_exposure_and_drawdown_limits(tmp_path, monkeypatch):
     assert bot.settings["halted"] is True and store.read("settings.json")[0]["halted"] is True
 
 
+def test_per_bet_cap_and_cash_floor(tmp_path, monkeypatch):
+    monkeypatch.setattr(pm, "best_prices", lambda a: (0.38, 0.42))
+    monkeypatch.setattr(live_us, "us_market", lambda slug, event="": "atc-" + slug)
+    store = LocalStore(str(tmp_path))
+    store.write("settings.json", {**DEFAULT_SETTINGS, "paper_start_bank": 300, "size_mode": "5",
+                                  "max_exposure_pct": 100, "max_per_bet": 50, "min_cash": 50}, "")
+    bot = main.Bot(store)
+    for _ in range(12):                                  # he buys the same outcome 12 times
+        bot.copy(dict(TRADE), 1)
+    assert round(bot.state["positions"]["A"]["gross_in"], 2) == 50.0
+    assert bot.state["skipped"]["already $50 in this bet"] == 2
+    for i in range(60):                                  # then lots of other bets
+        bot.copy(dict(TRADE, asset=f"B{i}", conditionId=f"m{i}"), 1)
+    assert bot.state["bank"] >= 50 and bot.state["skipped"]["would take cash under $50"] > 0
+
+
 def test_slippage_cap_skips_buys_priced_past_his(tmp_path, monkeypatch):
     monkeypatch.setattr(live_us, "us_market", lambda slug, event="": "atc-" + slug)
     asks = {"atc-a": 0.405, "atc-b": 0.43}
@@ -374,6 +390,7 @@ def test_live_sync_takes_cash_and_shares_from_the_account(tmp_path, monkeypatch)
     assert st["positions"]["A"]["shares"] == 10.0                      # account had fewer than we thought
     assert "B" not in st["positions"]                                  # sold outside the bot
     assert [o["slug"] for o in st["account"]["outside"]] == ["aec-x"]
+    assert st["start_bank"] > 250 and "Deposit" in st["log"][0][1]    # a deposit isn't profit
 
 
 def test_orders_round_to_tick_in_our_favour(monkeypatch):

@@ -38,6 +38,8 @@ DEFAULT_SETTINGS = {
     "paper_start_bank": 3000.0,
     "max_exposure_pct": 50.0,  # never have more than this % of the account in open bets
     "max_drawdown_pct": 25.0,  # halt if the account falls this % below where it started
+    "max_per_bet": 0.0,        # most we put into one outcome across all his entries (0 = no limit)
+    "min_cash": 0.0,           # never let cash drop below this ($)
     "reset_paper": False,      # one-shot: wipe paper history and start over
 }
 

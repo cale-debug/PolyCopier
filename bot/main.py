@@ -207,6 +207,14 @@ class Bot:
                 return skip(self.state, "drawdown limit")
             if exposure(self.state) + usd > equity * float(self.settings.get("max_exposure_pct", 50)) / 100:
                 return skip(self.state, "exposure limit")
+            cap = float(self.settings.get("max_per_bet", 0) or 0)
+            if cap and held is not None:
+                usd = min(usd, cap - held.get("gross_in", held["cost"]))
+                if usd < 0.5:
+                    return skip(self.state, f"already ${cap:.0f} in this bet")
+            floor = float(self.settings.get("min_cash", 0) or 0)
+            if floor and self.state["bank"] - usd * 1.05 < floor:
+                return skip(self.state, f"would take cash under ${floor:.0f}")
             his_price = float(t.get("price") or 0)
             # Price off the book we'd really trade on: Polymarket US when the market is there.
             if us_slug:
@@ -456,12 +464,14 @@ class Bot:
             return log(self.state, "Couldn't reach the Polymarket US account to sync")
         acct["synced_at"] = int(time.time())
         held = live_us.positions()
+        unbooked = False
         if held is not None:
             ours = {p["us_slug"]: a for a, p in self.state["positions"].items() if p.get("us_slug")}
             for slug, a in ours.items():
                 pos, real = self.state["positions"][a], held.get(slug)
                 qty = real["qty"] if real else 0.0
                 if real and real["expired"]:
+                    unbooked = True
                     continue  # settled; upkeep books the result
                 if abs(qty - pos["shares"]) > max(0.01, 0.01 * pos["shares"]):
                     if qty <= 0:
@@ -475,6 +485,12 @@ class Bot:
                         pos["shares"] = qty
                         pos["avg"] = pos["cost"] / qty
             acct["outside"] = [{"slug": s2, **r} for s2, r in held.items() if s2 not in ours and r["qty"] > 0]
+        # Cash the bot can't explain is a deposit or withdrawal, not profit or loss: move the
+        # starting line with it. Skipped while a settled payout hasn't been booked yet.
+        moved = round(acct["buying_power"] - self.state["bank"], 2)
+        if held is not None and not unbooked and abs(moved) >= 1.0:
+            self.state["start_bank"] = round(self.state["start_bank"] + moved, 2)
+            log(self.state, f"{'Deposit' if moved > 0 else 'Withdrawal'} of ${abs(moved):.2f} seen in the account")
         # Last, so the account's own cash figure wins over anything booked above.
         self.state["bank"] = acct["buying_power"]
         self.state["account"] = acct
