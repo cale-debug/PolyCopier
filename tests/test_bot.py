@@ -93,7 +93,7 @@ def test_loop_copies_buys_and_sells(tmp_path, monkeypatch):
     store = LocalStore(str(tmp_path))
     bot = main.Bot(store)
     bot.poll()                                   # first poll pins the cursor to "now"
-    now = bot.state["cursor"]["ts"]
+    now = bot.state["cursors"][bot.target()]["ts"]
     fake.trades = [
         dict(TRADE, timestamp=now + 1),
         dict(TRADE, timestamp=now + 2, transactionHash="0x2", asset="B", slug="elsewhere", usdcSize=50),
@@ -122,7 +122,42 @@ def test_kill_switch_and_target_change(tmp_path, monkeypatch):
     assert bot.state["positions"] == {} and bot.settings["halted"] is True
     assert store.read("settings.json")[0]["kill"] is False
     bot.poll()
-    assert bot.state["cursor"]["target"] == "0xabc"
+    assert list(bot.state["cursors"]) == ["0xabc"]
+
+
+def test_follows_several_traders_and_tags_who(tmp_path, monkeypatch):
+    feeds = {"0xa": [], "0xb": []}
+    monkeypatch.setattr(pm, "new_trades", lambda w, since: [t for t in feeds[w] if t["timestamp"] >= since])
+    monkeypatch.setattr(pm, "best_prices", lambda a: (0.38, 0.42))
+    monkeypatch.setattr(live_us, "us_market", lambda slug, event="": "atc-" + slug)
+    store = LocalStore(str(tmp_path))
+    store.write("settings.json", {**DEFAULT_SETTINGS, "target": "0xA, 0xb", "target_label": "alice, bob",
+                                  "size_mode": "5", "max_exposure_pct": 100}, "")
+    bot = main.Bot(store)
+    bot.state.pop("cursors"); bot.state["cursor"] = {"target": "0xa", "ts": 50, "seen": []}  # old single-trader state
+    bot.poll()
+    assert bot.state["cursors"]["0xa"]["ts"] == 50 and set(bot.state["traders"]) == {"0xa", "0xb"}
+    now = bot.state["cursors"]["0xb"]["ts"]
+    feeds["0xa"] = [dict(TRADE, timestamp=now + 1, asset="A", size=100)]
+    feeds["0xb"] = [dict(TRADE, timestamp=now + 1, asset="B", transactionHash="0xb1", size=100),
+                    dict(TRADE, timestamp=now + 2, asset="A", transactionHash="0xb2", size=100)]
+    bot.poll()
+    pos = bot.state["positions"]
+    assert pos["A"]["who"] == ["alice", "bob"] and pos["B"]["who"] == ["bob"]
+    assert {t["who"] for t in bot.state["trades"]} == {"alice", "bob"}
+    assert bot.state["traders"]["0xb"]["buys"] == 2
+    # alice sells all of hers: that is half of the stack we copied into A, so we sell half.
+    shares = pos["A"]["shares"]
+    feeds["0xa"].append(dict(TRADE, timestamp=now + 3, asset="A", transactionHash="0xa2", side="SELL", size=100))
+    # a sell of B by alice is ignored: we never copied B from her.
+    feeds["0xa"].append(dict(TRADE, timestamp=now + 4, asset="B", transactionHash="0xa3", side="SELL", size=100))
+    bot.poll()
+    assert abs(pos["A"]["shares"] - shares / 2) < 1e-9 and "B" in pos
+    assert bot.state["trades"][0]["side"] == "SELL" and bot.state["trades"][0]["who"] == "alice, bob"
+    # Removing a trader stops following him; his open positions stay.
+    store.write("settings.json", {**bot.settings, "target": "0xb", "target_label": "bob"}, "")
+    bot.refresh_settings(); bot.poll()
+    assert list(bot.state["cursors"]) == ["0xb"] and "B" in pos
 
 
 def test_order_fill_parsing():

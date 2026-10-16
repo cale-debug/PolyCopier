@@ -137,23 +137,51 @@ class Bot:
             self.settings = s
 
     # ---------------------------------------------------------------- copy --
+    def targets(self) -> list:
+        """[(wallet, label)] for every trader we copy. settings.target is a comma list of
+        wallets and target_label the matching comma list of names."""
+        wallets = [w.strip().lower() for w in str(self.settings.get("target", "")).split(",") if w.strip()]
+        labels = [x.strip() for x in str(self.settings.get("target_label") or "").split(",")]
+        return [(w, labels[i] if i < len(labels) and labels[i] else w[:8]) for i, w in enumerate(wallets)]
+
     def target(self) -> str:
-        return str(self.settings.get("target", "")).lower()
+        """The first trader's wallet (used where a single wallet is needed and none was given)."""
+        ts = self.targets()
+        return ts[0][0] if ts else ""
+
+    def sync_traders(self) -> None:
+        """Start a cursor for each newly added trader (from now on, no replay) and drop removed ones."""
+        st = self.state
+        curs, traders = st.setdefault("cursors", {}), st.setdefault("traders", {})
+        old = st.pop("cursor", None)  # single-trader state from before
+        if old and old.get("target"):
+            curs.setdefault(old["target"], {"ts": old.get("ts", 0), "seen": old.get("seen", [])})
+            his = st.pop("his", None) or {}
+            traders.setdefault(old["target"], {"since": int(time.time()), "buys": 0, "sells": 0, "usd": 0.0, **his})
+        wanted = dict(self.targets())
+        for w, label in wanted.items():
+            if w not in curs:
+                curs[w] = {"ts": int(time.time()), "seen": []}
+                traders[w] = {"since": int(time.time()), "buys": 0, "sells": 0, "usd": 0.0}
+                log(st, f"Now copying {label}")
+                self.dirty = True
+            traders.setdefault(w, {"since": int(time.time()), "buys": 0, "sells": 0, "usd": 0.0})["label"] = label
+        for w in [w for w in curs if w not in wanted]:
+            log(st, f"Stopped copying {traders.get(w, {}).get('label') or w[:8]}")
+            curs.pop(w)
+            traders.pop(w, None)
+            self.dirty = True
 
     def poll(self) -> None:
-        cur = self.state["cursor"]
-        if cur.get("target") != self.target():
-            # New target: follow from now on, don't replay his history.
-            self.state["cursor"] = cur = {"target": self.target(), "ts": int(time.time()), "seen": []}
-            self.state["his"] = {"since": int(time.time()), "buys": 0, "sells": 0, "usd": 0.0}
-            self.his_stats_at = 0
-            log(self.state, f"Now copying {self.settings.get('target_label') or self.target()}")
-            self.dirty = True
-        if not self.target():
-            return
-        trades = pm.new_trades(self.target(), cur["ts"])
+        self.sync_traders()
+        for wallet, label in self.targets():
+            self.poll_one(wallet, label)
+
+    def poll_one(self, wallet: str, label: str) -> None:
+        cur = self.state["cursors"][wallet]
+        trades = pm.new_trades(wallet, cur["ts"])
         if trades:
-            L.info("%d trade rows from target since %d", len(trades), cur["ts"])
+            L.info("%d trade rows from %s since %d", len(trades), label, cur["ts"])
         seen = set(cur["seen"])
         for t in trades:
             k = pm.trade_key(t)
@@ -164,15 +192,17 @@ class Bot:
             if ts > cur["ts"]:
                 cur["ts"] = ts
                 seen = {k}
-            his = self.state.setdefault("his", {"since": cur["ts"], "buys": 0, "sells": 0, "usd": 0.0})
+            his = self.state["traders"][wallet]
             his["buys" if str(t.get("side")).upper() == "BUY" else "sells"] += 1
             his["usd"] = round(his["usd"] + float(t.get("usdcSize") or 0), 2)
-            self.copy(t, max(0, int(time.time()) - ts))
+            self.copy({**t, "_wallet": wallet, "_who": label}, max(0, int(time.time()) - ts))
             self.dirty = True
         cur["seen"] = list(seen)[-200:]
 
     def copy(self, t: dict, delay: int) -> None:
         side = str(t.get("side")).upper()
+        wallet = t.get("_wallet") or self.target()
+        who = {"who": t.get("_who") or (dict(self.targets()).get(wallet) or wallet[:8]), "wallet": wallet}
         asset = str(t.get("asset"))
         his_usd = float(t.get("usdcSize") or 0) or float(t.get("size") or 0) * float(t.get("price") or 0)
         us_slug, long, no_match = live_us.match(t.get("slug") or "", t.get("eventSlug") or "", t.get("outcome"))
@@ -182,7 +212,7 @@ class Bot:
             self.state["us"]["checked"] += 1
             self.state["us"]["available"] += on_us
             held = self.state["positions"].get(asset)
-            if held is not None and "his_shares" in held:
+            if held is not None and "his_shares" in held and wallet in held.get("seeded", held.get("wallets", [wallet])):
                 held["his_shares"] += his_size  # so we know what share of his stack a later sell is
         if side == "BUY":
             why = should_copy_buy(self.settings, his_usd)
@@ -225,12 +255,12 @@ class Bot:
             ask = b.get("ask")
             if ask is None:
                 return skip(self.state, "no sellers")
-            self.shadow_buy(t, usd, ask, delay, us_slug, long)
+            self.shadow_buy(t, usd, ask, delay, us_slug, long, who)
             why = self.price_filter(b, his_price, delay)
             if why:
                 return skip(self.state, why)
             meta = {"src": asset, "src_market": t.get("conditionId"), "dst": us_slug, "dst_side": "YES" if long else "NO",
-                    "bid": b.get("bid"), "ask": ask, "spread": b.get("spread"), "depth": b.get("ask_shares")}
+                    "bid": b.get("bid"), "ask": ask, "spread": b.get("spread"), "depth": b.get("ask_shares"), **who}
             if self.mode == "live":
                 return self.live_buy(t, usd, us_slug, long, ask, delay, meta)
             # Paper fill: we can only take what's resting at the best ask; the rest is a missed fill.
@@ -246,18 +276,19 @@ class Bot:
                 pos = self.state["positions"][asset]
                 pos.update(us=on_us, us_slug=us_slug, long=long)
                 pos["partial"] = pos.get("partial", 0) + partial
-                self.seed_his_shares(pos, his_size)
+                self.seed_his_shares(pos, his_size, wallet)
                 L.info("BUY  $%.2f %s %s @ %.3f (he paid %.3f, %ds late)", usd, t.get("outcome"),
                        t.get("title"), ask, his_price, delay)
         elif side == "SELL":
             # Exits are followed even while halted: halting stops new bets, not getting out.
             if not self.settings.get("copy_sells"):
                 return
-            if asset not in self.state["positions"]:
-                return self.shadow_sell(asset, float(t.get("size") or 0))
             sold = float(t.get("size") or 0)
-            self.shadow_sell(asset, sold)
-            fraction = self.exit_fraction(self.state["positions"][asset], asset, sold)
+            self.shadow_sell(asset, sold, wallet)
+            pos = self.state["positions"].get(asset)
+            if pos is None or wallet not in pos.get("wallets", [wallet]):
+                return  # not a position we copied from this trader
+            fraction = self.exit_fraction(pos, asset, sold, wallet)
             if self.mode == "live":
                 return self.live_sell(asset, fraction)
             bid, _ = self.quote(asset)
@@ -280,11 +311,12 @@ class Bot:
             return "price moved past slippage cap"
         return None
 
-    def exit_fraction(self, pos: dict, asset: str, sold: float) -> float:
-        """What fraction of a position to sell when he sells `sold` shares: his share of his own stack."""
+    def exit_fraction(self, pos: dict, asset: str, sold: float, wallet: str) -> float:
+        """What fraction of a position to sell when a trader sells `sold` shares: that sale's share of
+        the stack held by the traders we copied into it."""
         before = pos.get("his_shares")
         if not before:
-            before = sold + pm.his_position_shares(self.target(), asset)
+            before = sold + pm.his_position_shares(wallet, asset)
         fraction = min(1.0, sold / before) if before > 0 else 1.0
         pos["his_shares"] = max(0.0, before - sold)
         return 1.0 if pos["his_shares"] < 1e-6 else fraction  # he's fully out, so are we
@@ -295,7 +327,7 @@ class Bot:
         sh = self.state.get("shadow")
         if not sh:
             sh = self.state["shadow"] = new_state(float(self.state["start_bank"]))
-            for k in ("trades", "equity", "log", "cursor", "us", "live_spent_today"):
+            for k in ("trades", "equity", "log", "cursor", "cursors", "traders", "us", "live_spent_today"):
                 sh.pop(k, None)
             # Start from where the real book is, so the two only differ by what the filters skip.
             for k in ("bank", "realized", "wins", "losses", "fees", "positions", "totals"):
@@ -307,35 +339,38 @@ class Bot:
         sh["trades"] = []
         del sh.setdefault("closed", [])[:]
 
-    def shadow_buy(self, t: dict, usd: float, ask: float, delay: int, us_slug, long) -> None:
+    def shadow_buy(self, t: dict, usd: float, ask: float, delay: int, us_slug, long, who: dict) -> None:
         sh = self.shadow()
         asset = str(t["asset"])
         size = float(t.get("size") or 0)
         held = sh["positions"].get(asset)
         if held is not None:
             held["his_shares"] = held.get("his_shares", 0.0) + size
-        if buy(sh, t, usd, ask, delay, live_us.fee_coefficient(us_slug)) and held is None:
+        if buy(sh, t, usd, ask, delay, live_us.fee_coefficient(us_slug), meta=who) and held is None:
             pos = sh["positions"][asset]
             pos.update(us_slug=us_slug, long=long)
-            pos["his_shares"] = max(pm.his_position_shares(self.target(), asset), size)
+            pos["his_shares"] = max(pm.his_position_shares(who["wallet"], asset), size)
         self._shadow_tidy(sh)
 
-    def shadow_sell(self, asset: str, sold: float) -> None:
+    def shadow_sell(self, asset: str, sold: float, wallet: str) -> None:
         sh = self.shadow()
         pos = sh["positions"].get(asset)
-        if not pos:
+        if not pos or wallet not in pos.get("wallets", [wallet]):
             return
-        fraction = self.exit_fraction(pos, asset, sold)
+        fraction = self.exit_fraction(pos, asset, sold, wallet)
         bid, _ = live_us.quote(pos["us_slug"], pos["long"]) if pos.get("us_slug") and self.us_side(pos) is not None \
             else pm.best_prices(asset)
         if bid is not None:
             sell(sh, asset, fraction, bid, "copied sell")
         self._shadow_tidy(sh)
 
-    def seed_his_shares(self, pos: dict, his_size: float) -> None:
-        """On our first buy of an outcome, note how many shares he holds (including any from before we started)."""
-        if "his_shares" not in pos:
-            pos["his_shares"] = max(pm.his_position_shares(self.target(), pos["asset"]), his_size)
+    def seed_his_shares(self, pos: dict, his_size: float, wallet: str) -> None:
+        """On a trader's first copied buy of an outcome, add the shares he holds (including any from
+        before we started) to the stack our exits are measured against."""
+        seeded = pos.setdefault("seeded", pos.get("wallets", [wallet])[:1] if "his_shares" in pos else [])
+        if wallet not in seeded:
+            pos["his_shares"] = pos.get("his_shares", 0.0) + max(pm.his_position_shares(wallet, pos["asset"]), his_size)
+            seeded.append(wallet)
 
     # ---------------------------------------------------------------- live --
     def quote(self, asset: str):
@@ -390,7 +425,7 @@ class Bot:
         pos = self.state["positions"][str(t["asset"])]
         pos.update(us=True, us_slug=us_slug, long=long)
         pos["partial"] = pos.get("partial", 0) + partial
-        self.seed_his_shares(pos, float(t.get("size") or 0))
+        self.seed_his_shares(pos, float(t.get("size") or 0), t.get("_wallet") or self.target())
 
     def live_sell(self, asset: str, fraction: float, why: str = "copied sell") -> None:
         pos = self.state["positions"][asset]
@@ -535,13 +570,14 @@ class Bot:
         self.state["exposure"] = round(exposure(self.state), 2)
         if self.mode == "live":
             self.sync_account()
-        if self.target() and time.time() - getattr(self, "his_stats_at", 0) > 600:
-            his = self.state.setdefault("his", {"since": int(time.time()), "buys": 0, "sells": 0, "usd": 0.0})
-            pnl = pm.leaderboard_pnl(self.target())
-            if "all" in pnl:
-                his.setdefault("pnl_all_at_start", pnl["all"])
-                pnl["since_copy"] = round(pnl["all"] - his["pnl_all_at_start"], 2)
-            his["pnl"] = pnl
+        if self.targets() and time.time() - getattr(self, "his_stats_at", 0) > 600:
+            self.sync_traders()
+            for wallet, his in self.state["traders"].items():
+                pnl = pm.leaderboard_pnl(wallet)
+                if "all" in pnl:
+                    his.setdefault("pnl_all_at_start", pnl["all"])
+                    pnl["since_copy"] = round(pnl["all"] - his["pnl_all_at_start"], 2)
+                his["pnl"] = pnl
             self.his_stats_at = time.time()
 
     def run(self) -> None:

@@ -58,7 +58,8 @@ def new_state(bank: float) -> dict:
         "skipped": {},
         "us": {"checked": 0, "available": 0},
         "equity": [],            # [ts, equity]
-        "cursor": {"target": "", "ts": 0, "seen": []},
+        "cursors": {},           # wallet -> {"ts", "seen"}: where we are in each trader's feed
+        "traders": {},           # wallet -> {"label", "since", "buys", "sells", "usd", "pnl"}
         "heartbeat": 0,
         "live_spent_today": {"day": "", "usd": 0.0},
         "log": [],
@@ -167,6 +168,9 @@ def buy(state: dict, trade: dict, usd: float, price: float, delay: int,
     slip = shares * (price - his_price) if his_price else 0.0
     for k, v in (("gross_in", usd), ("fees_in", fee), ("slip", slip), ("delay_sum", delay), ("fills", 1)):
         pos[k] = pos.get(k, 0.0) + v
+    for key, val in (("who", (meta or {}).get("who")), ("wallets", (meta or {}).get("wallet"))):
+        if val and val not in pos.setdefault(key, []):
+            pos[key].append(val)  # every trader we copied into this position
     state["positions"][asset] = pos
     state["bank"] -= usd + fee
     state["fees"] = round(state.get("fees", 0.0) + fee, 2)
@@ -218,6 +222,8 @@ def sell(state: dict, asset: str, fraction: float, price: float, why: str,
     fill = {"side": "SELL" if why != "resolved" else "SETTLE", "title": pos["title"], "outcome": pos["outcome"],
             "price": round(price, 4), "usd": round(proceeds, 2), "fee": fee, "shares": round(shares, 4),
             "pnl": round(pnl, 2), "note": why}
+    if pos.get("who"):
+        fill["who"] = ", ".join(pos["who"])
     _record(state, **fill)
     return fill
 
@@ -232,6 +238,7 @@ def _close(state: dict, pos: dict, net: float, why: str) -> None:
         "fees_in": round(pos.get("fees_in", 0.0), 2), "fees_out": round(pos.get("fees_out", 0.0), 2),
         "slip": round(pos.get("slip", 0.0), 4), "delay": round(pos.get("delay_sum", 0.0) / fills, 1),
         "fills": fills, "partial": pos.get("partial", 0), "net": round(net, 4), "exit": why,
+        "who": ", ".join(pos.get("who") or []),
     }
     row["gross"] = round(row["gross_out"] - row["gross_in"], 4)
     closed = state.setdefault("closed", [])
