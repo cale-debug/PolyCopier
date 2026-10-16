@@ -234,6 +234,21 @@ def test_per_bet_cap_and_cash_floor(tmp_path, monkeypatch):
     assert bot.state["bank"] >= 50 and bot.state["skipped"]["would take cash under $50"] > 0
 
 
+def test_per_bet_cap_is_shared_across_traders(tmp_path, monkeypatch):
+    monkeypatch.setattr(pm, "best_prices", lambda a: (0.38, 0.42))
+    monkeypatch.setattr(live_us, "us_market", lambda slug, event="": "atc-" + slug)
+    store = LocalStore(str(tmp_path))
+    store.write("settings.json", {**DEFAULT_SETTINGS, "paper_start_bank": 300, "size_mode": "5", "target": "0xa,0xb",
+                                  "target_label": "ic4cream, juice-fruit", "max_exposure_pct": 100, "max_per_bet": 50}, "")
+    bot = main.Bot(store)
+    for _ in range(10):                                  # ic4cream fills the Broncos bet to $50
+        bot.copy(dict(TRADE, _wallet="0xa", _who="ic4cream"), 1)
+    bot.copy(dict(TRADE, _wallet="0xb", _who="juice-fruit"), 1)   # juice-fruit buys the same side
+    pos = bot.state["positions"]["A"]
+    assert round(pos["gross_in"], 2) == 50.0 and pos["who"] == ["ic4cream"]
+    assert bot.state["skipped"]["already $50 in this bet"] == 1
+
+
 def test_slippage_cap_skips_buys_priced_past_his(tmp_path, monkeypatch):
     monkeypatch.setattr(live_us, "us_market", lambda slug, event="": "atc-" + slug)
     asks = {"atc-a": 0.405, "atc-b": 0.43}
