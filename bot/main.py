@@ -101,10 +101,45 @@ class Bot:
                            slip=sum(r["shares"] * (r["price"] - float(r.get("his_price") or r["price"])) for r in buys),
                            category=pos.get("category") or (pos.get("slug") or "other").split("-")[0])
                 add_total(st, gross_in=pos["gross_in"], fees_in=fee, slip=pos["slip"])
+        if not st.get("who_backfilled"):
+            self.backfill_who(st)
         if self.mode == "live" and not st.get("no_px_fixed"):
             self.fix_no_fills(st)
         st["mode"] = self.mode
         return st
+
+    @staticmethod
+    def backfill_who(st: dict) -> None:
+        """One-time: tag fills and positions from before trader tags existed with whoever the
+        bot was copying at the time, read from the 'Now copying X' log lines."""
+        switches = sorted((ts, m[len("Now copying "):]) for ts, m in st.get("log", []) if m.startswith("Now copying "))
+        def at(ts):
+            who = None
+            for t, name in switches:
+                if t <= ts:
+                    who = name
+            return who
+        for row in st.get("trades", []):
+            if "who" not in row and row.get("side") == "BUY" and at(row.get("ts", 0)):
+                row["who"] = at(row["ts"])
+        for pos in st.get("positions", {}).values():
+            if not pos.get("who"):
+                names = {r["who"] for r in st["trades"] if r.get("side") == "BUY" and r.get("who")
+                         and r["title"] == pos["title"] and r["outcome"] == pos["outcome"]}
+                if names:
+                    pos["who"] = sorted(names)
+        for row in st.get("trades", []):
+            if "who" not in row and row.get("side") != "BUY":
+                names = {r["who"] for r in st["trades"] if r.get("side") == "BUY" and r.get("who")
+                         and r["title"] == row["title"] and r["outcome"] == row["outcome"]}
+                if names:
+                    row["who"] = ", ".join(sorted(names))
+        for row in st.get("closed", []):
+            if not row.get("who"):
+                names = {r["who"] for r in st["trades"] if r.get("side") == "BUY" and r.get("who")
+                         and r["title"] == row["title"] and r["outcome"] == row["outcome"]}
+                row["who"] = ", ".join(sorted(names))
+        st["who_backfilled"] = True
 
     @staticmethod
     def fix_no_fills(st: dict) -> None:

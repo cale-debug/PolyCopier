@@ -117,7 +117,7 @@ ol { padding-left: 20px; line-height: 1.6; } a { color: var(--neon); }
       <input id="target" autocomplete="off" autocapitalize="off" spellcheck="false">
       <div class="hint" id="locked">&gt; loading…</div>
       <div class="hint" id="hisline" style="white-space:normal"></div>
-      <button class="big lock" id="lockBtn">LOCK TARGET</button>
+      <button class="big lock" id="lockBtn">LOCK TARGETS</button>
       <button class="big halt" id="haltBtn">HALT</button>
       <button class="big kill" id="killBtn">⛔ KILL SWITCH - CASH OUT ALL</button>
     </div>
@@ -133,7 +133,7 @@ ol { padding-left: 20px; line-height: 1.6; } a { color: var(--neon); }
           <div class="hint" id="propHint"></div>
         </div>
         <div>
-          <div class="label">Min his bet</div>
+          <div class="label">Min trader bet</div>
           <div class="row" id="minbet">
             <button class="opt" data-v="0">ALL</button><button class="opt" data-v="100">$100</button>
             <button class="opt" data-v="1000">$1K</button>
@@ -147,13 +147,13 @@ ol { padding-left: 20px; line-height: 1.6; } a { color: var(--neon); }
           <div class="row" id="usonly"><button class="opt" data-v="true">ON</button><button class="opt" data-v="false">OFF</button></div></div>
       </div>
       <div style="margin-top:14px">
-        <div class="label">Max slippage (pay at most his price +)</div>
+        <div class="label">Max slippage (pay at most their price +)</div>
         <div class="row" id="slipcap">
           <button class="opt" data-v="0">0&cent;</button><button class="opt" data-v="0.5">&frac12;&cent;</button>
           <button class="opt" data-v="1">1&cent;</button><button class="opt" data-v="2">2&cent;</button>
           <button class="opt" data-v="5">5&cent;</button><button class="opt" data-v="-1">ANY</button>
         </div>
-        <div class="hint">Buys that would cost more than this over his price are skipped.</div>
+        <div class="hint">Buys that would cost more than this over the trader's price are skipped.</div>
       </div>
     </div>
 
@@ -166,7 +166,7 @@ ol { padding-left: 20px; line-height: 1.6; } a { color: var(--neon); }
       <div class="label" style="margin-top:14px">Closed trades by</div>
       <div class="row" id="groupBy">
         <button class="opt on" data-v="category">SPORT</button><button class="opt" data-v="hold">HOLD TIME</button>
-        <button class="opt" data-v="delay">DELAY</button><button class="opt" data-v="fill">FILL</button>
+        <button class="opt" data-v="delay">DELAY</button><button class="opt" data-v="fill">FILL</button><button class="opt" data-v="who">TRADER</button>
       </div>
       <table class="rep" style="margin-top:8px"><thead><tr><th>Group</th><th class="n">Trades</th><th class="n">Win %</th><th class="n">Fees</th><th class="n">Net</th><th class="n hide-sm">Per $1</th></tr></thead><tbody id="groups"></tbody></table>
       <div class="label" style="margin-top:14px">Lost to costs</div>
@@ -234,9 +234,10 @@ ol { padding-left: 20px; line-height: 1.6; } a { color: var(--neon); }
         <button class="opt" data-v="100">$100</button><button class="opt" data-v="500">$500</button>
         <button class="opt" data-v="1000">$1K</button><button class="opt" data-v="3000">$3K</button><button class="opt" data-v="5000">$5K</button>
       </div>
-      <div class="cols" style="margin-top:12px">
-        <div><div class="label">Max % in open bets</div><input id="maxExp" inputmode="decimal"></div>
-        <div><div class="label">Halt if down %</div><input id="maxDd" inputmode="decimal"></div>
+      <div class="label" style="margin-top:12px">Risk limits // paper and live</div>
+      <div class="cols">
+        <div><div class="label">Max % in open bets (100 = off)</div><input id="maxExp" inputmode="decimal"></div>
+        <div><div class="label">Halt if down % (100 = off)</div><input id="maxDd" inputmode="decimal"></div>
         <div><div class="label">Max in one bet ($, 0 = none)</div><input id="maxBet" inputmode="decimal"></div>
         <div><div class="label">Keep at least ($ cash)</div><input id="minCash" inputmode="decimal"></div>
       </div>
@@ -246,8 +247,8 @@ ol { padding-left: 20px; line-height: 1.6; } a { color: var(--neon); }
         <div><div class="label">Max spread (&cent;)</div><input id="fSpread" inputmode="decimal"></div>
         <div><div class="label">Min $ at best price</div><input id="fDepth" inputmode="decimal"></div>
       </div>
-      <div class="hint">Max price above his is the slippage setting on the DASH tab. Skipped copies and why are listed under Skipped.</div>
-      <div class="label" style="margin-top:12px">PROP size (% of his bet)</div>
+      <div class="hint">Max price above the trader's is the slippage setting on the DASH tab. Skipped copies and why are listed under Skipped.</div>
+      <div class="label" style="margin-top:12px">PROP size (% of their bet)</div>
       <input id="propPct" inputmode="decimal">
       <button class="big kill" id="resetPaper">RESET PAPER ACCOUNT</button>
       <button class="big lock" id="restartBot">RESTART BOT</button>
@@ -328,7 +329,7 @@ function renderSettings() {
   $("locked").textContent = nT > 1 ? `> locked on ${nT} traders: ${settings.target_label || ""}` : `> locked: ${settings.target_label || ""} [${(settings.target || "").slice(0, 12)}…]`;
   setOpts("size", settings.size_mode); setOpts("minbet", settings.min_his_bet); setOpts("sells", settings.copy_sells); setOpts("usonly", settings.us_only !== false); setOpts("slipcap", settings.max_slip_cents ?? 1);
   setOpts("startBank", settings.paper_start_bank);
-  $("propHint").textContent = settings.size_mode === "prop" ? `PROP = ${settings.prop_pct}% of his dollar size` : "";
+  $("propHint").textContent = settings.size_mode === "prop" ? `PROP = ${settings.prop_pct}% of the trader's dollar size` : "";
   $("haltBtn").textContent = settings.halted ? "RESUME" : "HALT";
   $("haltBtn").className = "big " + (settings.halted ? "resume" : "halt");
   if (document.activeElement !== $("maxTrade")) $("maxTrade").value = settings.live_max_trade;
@@ -345,12 +346,13 @@ function renderSettings() {
 
 function slip(t) {
   const d = Math.round((t.price - (t.his_price || 0)) * 1000) / 10;
-  return d > 0 ? `+${d}¢ vs him` : d < 0 ? `${d}¢ vs him` : "same price";
+  return d > 0 ? `+${d}¢ vs them` : d < 0 ? `${d}¢ vs them` : "same price";
 }
 
 let groupBy = "category";
 function bucket(r) {
   if (groupBy === "category") return (r.category || "other").toUpperCase();
+  if (groupBy === "who") return r.who || "UNTAGGED";
   if (groupBy === "fill") return r.partial ? "PARTIAL FILL" : "FULL FILL";
   if (groupBy === "delay") return r.delay < 5 ? "under 5s" : r.delay < 15 ? "5-15s" : r.delay < 60 ? "15-60s" : "60s+";
   const h = (r.closed - (r.opened || r.closed)) / 3600;
@@ -372,7 +374,7 @@ function renderReport() {
   const rows = [
     ["Gross P&L (before fees)", b.gross], ["Entry fees", -(t.fees_in || 0)], ["Exit fees", -(t.fees_out || 0)],
     ["Net P&L", b.net], ["  realized (closed)", state.realized], ["  unrealized (open, at mid)", b.unreal],
-    ["Slippage vs his prices (inside gross)", -(t.slip || 0)], ["Settlement payouts received", t.settled || 0],
+    ["Slippage vs their prices (inside gross)", -(t.slip || 0)], ["Settlement payouts received", t.settled || 0],
   ];
   const roc = state.start_bank ? (100 * b.net) / state.start_bank : 0;
   const per = t.gross_in ? (100 * b.net) / t.gross_in : 0;
@@ -381,7 +383,7 @@ function renderReport() {
     `<tr><td>Return per $ wagered</td><td class="n">${per.toFixed(1)}%</td></tr>`;
   const sh = state.shadow ? book(state.shadow) : null;
   const line = (name, x) => `<tr><td>${name}</td><td class="n">${x.n}</td><td class="n">${x.wl}</td><td class="n">${usd(x.fees)}</td><td class="n ${x.net < 0 ? "down" : "up"}">${usd(x.net)}</td></tr>`;
-  $("compare").innerHTML = line("With filters (you)", b) + (sh ? line("Any price", sh) : `<tr><td colspan="5" class="muted">Starts with his next trade</td></tr>`);
+  $("compare").innerHTML = line("With filters (you)", b) + (sh ? line("Any price", sh) : `<tr><td colspan="5" class="muted">Starts with the next copied trade</td></tr>`);
   const closed = state.closed || [];
   const g = {};
   closed.forEach((r) => { const k = bucket(r); const x = (g[k] = g[k] || { n: 0, w: 0, fees: 0, net: 0, cost: 0 });
@@ -413,11 +415,11 @@ function renderState() {
   const live = state.mode === "live";
   $("mode").textContent = live ? "LIVE" : "PAPER"; $("mode").classList.toggle("live", live);
   const us = state.us || { checked: 0, available: 0 };
-  $("usline").textContent = us.checked ? `on Polymarket US: ${us.available} of ${us.checked} of his buys (${Math.round((100 * us.available) / us.checked)}%) · started ${new Date(state.started_at * 1000).toLocaleDateString()} with ${usd(state.start_bank)}` : `started with ${usd(state.start_bank)}`;
+  $("usline").textContent = us.checked ? `on Polymarket US: ${us.available} of ${us.checked} of their buys (${Math.round((100 * us.available) / us.checked)}%) · started ${new Date(state.started_at * 1000).toLocaleDateString()} with ${usd(state.start_bank)}` : `started with ${usd(state.start_bank)}`;
 
   const sl = state.slip || { n: 0, cents: 0, skipped: 0 };
   const feeTxt = `fees paid ${usd(state.fees || 0)} (included in P&L)`;
-  $("slipline").textContent = sl.n || sl.skipped ? `slippage: avg ${(sl.cents / Math.max(1, sl.n)).toFixed(2)}¢ vs his price over ${sl.n} buys · ${sl.skipped} skipped for price · ${feeTxt}` : feeTxt;
+  $("slipline").textContent = sl.n || sl.skipped ? `slippage: avg ${(sl.cents / Math.max(1, sl.n)).toFixed(2)}¢ vs their price over ${sl.n} buys · ${sl.skipped} skipped for price · ${feeTxt}` : feeTxt;
 
   const alive = Date.now() / 1000 - state.heartbeat < 600;
   $("hb").className = "dot " + (alive ? (settings && settings.halted ? "off" : "on") : "off");
@@ -432,18 +434,19 @@ function renderState() {
 
   $("feed").innerHTML = state.trades.slice(0, 40).map((t) => {
     const cls = t.side === "BUY" ? "" : (t.pnl >= 0 ? "up" : "down");
-    const extra = t.side === "BUY" ? ` · he paid ${cents(t.his_price || 0)} for ${usd(t.his_usd)} · ${slip(t)} · ${t.delay}s late` : ` · P&L ${usd(t.pnl)}`;
+    const extra = t.side === "BUY" ? ` · they paid ${cents(t.his_price || 0)} for ${usd(t.his_usd)} · ${slip(t)} · ${t.delay}s late` : ` · P&L ${usd(t.pnl)}`;
     const fee = t.fee ? ` · fee ${usd(t.fee)}` : "";
     const from = t.who ? ` <span class="from">· from ${esc(t.who)}</span>` : "";
     return `<div class="${cls}"><span class="muted">${ago(t.ts)}</span> ${t.side} ${usd(t.usd)} ${esc(t.outcome)} @ ${cents(t.price)} · ${esc(t.title)}${from}<span class="muted">${fee}${extra}</span></div>`;
-  }).join("") || '<div class="muted">Waiting for his next trade…</div>';
+  }).join("") || '<div class="muted">Waiting for the next trade…</div>';
   $("skipped").textContent = Object.entries(state.skipped || {}).map(([k, v]) => `${k}: ${v}`).join(" · ") || "none";
   $("log").innerHTML = (state.log || []).slice(0, 12).map(([ts, m]) => `<div><span class="muted">${ago(ts)}</span> ${esc(m)}</div>`).join("");
-  const sgn = (x) => (x === undefined ? "?" : usd(x));
+  const big = (x) => { const a = Math.abs(x || 0); return (x < 0 ? "-$" : "$") + (a >= 1e6 ? (a / 1e6).toFixed(1) + "M" : a >= 1e3 ? (a / 1e3).toFixed(1) + "K" : a.toFixed(2)); };
+  const sgn = (x) => (x === undefined ? "?" : big(x));
   const traders = Object.values(state.traders || (state.his ? { one: state.his } : {}));
   $("hisline").innerHTML = traders.filter((h) => h.since).map((h) => {
     const hp = h.pnl || {};
-    return `<div>&gt; ${esc(h.label || "his record")} since we started copying: ${h.buys} buys · ${h.sells} sells · ${usd(h.usd)} traded · P&amp;L ${sgn(hp.since_copy)}  |  today ${sgn(hp.day)} · month ${sgn(hp.month)} · all-time ${sgn(hp.all)}</div>`;
+    return `<div>&gt; ${esc(h.label || "trader")}: ${h.buys} buys · ${h.sells} sells · ${big(h.usd)} traded since we started copying · their P&amp;L since then ${sgn(hp.since_copy)} · today ${sgn(hp.day)} · month ${sgn(hp.month)} · all-time ${sgn(hp.all)}</div>`;
   }).join("");
   drawEquity(state.equity || []);
   renderReport();
@@ -452,7 +455,7 @@ function renderState() {
   $("modebar").classList.toggle("live", live);
   $("modebar").classList.toggle("warn", !live && wantLive);
   const a = state.account;
-  $("acctline").innerHTML = live && a ? `Polymarket US account: cash ${usd(a.cash)} · buying power ${usd(a.buying_power)} · positions ${usd(a.positions_value)} · synced ${ago(a.synced_at)} ago` +
+  $("acctline").innerHTML = live && a ? `Polymarket US account: cash ${usd(a.cash)} · buying power ${usd(a.buying_power)} · synced ${ago(a.synced_at)} ago` +
     ((a.outside || []).length ? `<br>Not placed by the bot (left alone): ${a.outside.map((o) => esc(o.title || o.slug) + " " + o.qty).join(", ")}` : "") : "";
   $("liveStatus").textContent = live ? `Live mode is ON. Synced with your Polymarket US account ${a ? ago(a.synced_at) + " ago" : "soon"}.`
     : wantLive ? "Live requested but still on paper: " + (state.live_error || "the bot is restarting.") : "Paper mode. Nothing real is being bought.";
