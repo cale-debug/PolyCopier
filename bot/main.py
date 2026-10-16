@@ -101,8 +101,34 @@ class Bot:
                            slip=sum(r["shares"] * (r["price"] - float(r.get("his_price") or r["price"])) for r in buys),
                            category=pos.get("category") or (pos.get("slug") or "other").split("-")[0])
                 add_total(st, gross_in=pos["gross_in"], fees_in=fee, slip=pos["slip"])
+        if self.mode == "live" and not st.get("no_px_fixed"):
+            self.fix_no_fills(st)
         st["mode"] = self.mode
         return st
+
+    @staticmethod
+    def fix_no_fills(st: dict) -> None:
+        """One-time repair: NO buys filled before the YES-terms fix were booked at the YES
+        price (paid 0.44, booked 0.56). Rebook them at what was paid, and undo the
+        'deposit' the account sync then saw in the leftover cash."""
+        for row in st["trades"]:
+            if row.get("side") != "BUY" or row.get("dst_side") != "NO" or not row.get("fee_source"):
+                continue
+            paid = round(1 - row["price"], 4)
+            diff = row["shares"] * (row["price"] - paid)
+            row.update(price=paid, usd=round(row["usd"] - diff, 2))
+            for pos in st["positions"].values():
+                if pos["title"] == row["title"] and pos["outcome"] == row["outcome"] and pos.get("long") is False:
+                    for k in ("cost", "gross_in", "slip"):
+                        pos[k] = pos.get(k, 0.0) - diff
+                    pos["avg"] = pos["cost"] / pos["shares"]
+            add_total(st, gross_in=-diff, slip=-diff)
+            for ts, msg in st["log"]:
+                if msg.startswith("Deposit of $") and 0 <= ts - row["ts"] < 1800 \
+                        and abs(float(msg.split("$")[1].split()[0]) - diff) < 0.05:
+                    st["start_bank"] = round(st["start_bank"] - float(msg.split("$")[1].split()[0]), 2)
+            log(st, f"Rebooked NO buy of {row['title']} at the {paid * 100:.0f}c actually paid")
+        st["no_px_fixed"] = True
 
     def save(self, why: str = "Update state") -> None:
         self.state["heartbeat"] = int(time.time())
@@ -404,7 +430,7 @@ class Bot:
         except Exception as exc:
             log(self.state, f"Order failed: {exc}")
             return skip(self.state, "order error")
-        shares, px, reported = live_us.filled(resp)
+        shares, px, reported = live_us.filled(resp, long)
         if shares <= 0:
             why = live_us.rejection(resp)
             if why:
@@ -438,7 +464,7 @@ class Bot:
         except Exception as exc:
             log(self.state, f"Sell failed: {exc}")
             return skip(self.state, "order error")
-        shares, px, reported = live_us.filled(resp)
+        shares, px, reported = live_us.filled(resp, pos["long"])
         if shares <= 0:
             return skip(self.state, "sell not filled")
         sell(self.state, asset, min(1.0, shares / pos["shares"]), px, why,

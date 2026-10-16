@@ -228,7 +228,10 @@ def _round_order(us_slug: str, action: str, qty: float, limit: float) -> Tuple[f
 
 
 def place(slug: str, long: bool, action: str, qty: float, limit: float) -> dict:
-    """Immediate-or-cancel limit order: fills at `limit` or better, or not at all."""
+    """Immediate-or-cancel limit order: fills at `limit` or better, or not at all.
+
+    `limit` is the price of the side we trade. Polymarket US prices every order in
+    YES terms ("buy NO at 0.40" is sent as 0.60), so a NO order's limit is flipped."""
     qty, limit = _round_order(slug, action, qty, limit)
     if qty <= 0:
         return {"executions": [], "skipped": "order smaller than the market's minimum size"}
@@ -237,7 +240,7 @@ def place(slug: str, long: bool, action: str, qty: float, limit: float) -> dict:
         "type": "ORDER_TYPE_LIMIT",
         "outcomeSide": "OUTCOME_SIDE_YES" if long else "OUTCOME_SIDE_NO",
         "action": "ORDER_ACTION_BUY" if action == "BUY" else "ORDER_ACTION_SELL",
-        "price": {"value": f"{limit:.4f}", "currency": "USD"},
+        "price": {"value": f"{(limit if long else 1 - limit):.4f}", "currency": "USD"},
         "quantity": qty,
         "tif": "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
         "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_AUTOMATIC",
@@ -261,8 +264,10 @@ def rejection(resp: dict) -> Optional[str]:
     return None
 
 
-def filled(resp: dict) -> tuple:
+def filled(resp: dict, long: bool = True) -> tuple:
     """(shares, average price, fee or None) actually executed from an order response.
+
+    Execution prices come back in YES terms; for a NO order the price we paid is 1 - that.
 
     The fee is what the exchange reported on the executions, when it reports one;
     None means the caller should fall back to the published fee schedule.
@@ -284,7 +289,10 @@ def filled(resp: dict) -> tuple:
             fee = (fee or 0.0) + abs(float(f)) if f is not None else fee
         except (TypeError, ValueError):
             pass
-    return shares, (cost / shares if shares else 0.0), fee
+    px = cost / shares if shares else 0.0
+    if shares and not long:
+        px = 1 - px
+    return shares, px, fee
 
 
 def _amt(x) -> float:

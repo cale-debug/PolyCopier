@@ -437,3 +437,16 @@ def test_orders_round_to_tick_in_our_favour(monkeypatch):
     fill = {"executions": [{"lastShares": "2", "lastPx": {"value": "0.46"},
                             "commissionNotionalCollected": {"value": "0.03", "currency": "USD"}}]}
     assert live_us.filled(fill)[2] == 0.03
+    # NO orders are priced in YES terms both ways: buy NO at <= 0.46 is sent as 0.54,
+    # and a fill reported at 0.56 means we paid 0.44 for NO.
+    sent = []
+    class C:
+        orders = type("O", (), {"create": staticmethod(lambda o: sent.append(o) or {})})
+        def close(self): pass
+    import pytest as _p
+    mp = _p.MonkeyPatch(); mp.setattr(live_us, "_client", lambda: C())
+    live_us.place("m", False, "BUY", 10, 0.46)
+    mp.undo()
+    assert sent[0]["price"]["value"] == "0.5400" and sent[0]["outcomeSide"] == "OUTCOME_SIDE_NO"
+    no_fill = {"executions": [{"lastShares": "10.86", "lastPx": {"value": "0.56"}}]}
+    assert abs(live_us.filled(no_fill, long=False)[1] - 0.44) < 1e-9
