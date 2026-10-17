@@ -143,7 +143,7 @@ ol { padding-left: 20px; line-height: 1.6; } a { color: var(--neon); }
           <div class="label">Size mode</div>
           <div class="row" id="size">
             <button class="opt" data-v="1">$1</button><button class="opt" data-v="2">$2</button>
-            <button class="opt" data-v="5">$5</button><button class="opt" data-v="prop">PROP</button>
+            <button class="opt" data-v="5">$5</button><button class="opt" data-v="10">$10</button><button class="opt" data-v="prop">PROP</button>
           </div>
           <div class="hint" id="propHint"></div>
         </div>
@@ -507,7 +507,12 @@ function showTab(name) {
   ["dash", "live", "setup"].forEach((n) => $("tab-" + n).classList.toggle("hidden", n !== name));
 }
 document.querySelectorAll(".tab").forEach((t) => (t.onclick = () => showTab(t.dataset.tab)));
-document.querySelectorAll("#size .opt").forEach((b) => (b.onclick = () => saveSettings({ size_mode: b.dataset.v }, `Size ${b.dataset.v}`)));
+document.querySelectorAll("#size .opt").forEach((b) => (b.onclick = () => {
+  // A bigger fixed size also lifts the live per-trade cap, or the cap would quietly shrink every copy.
+  const n = Number(b.dataset.v), patch = { size_mode: b.dataset.v };
+  if (n && settings && n > Number(settings.live_max_trade || 0)) patch.live_max_trade = n;
+  saveSettings(patch, `Size ${b.dataset.v}`);
+}));
 document.querySelectorAll("#minbet .opt").forEach((b) => (b.onclick = () => saveSettings({ min_his_bet: Number(b.dataset.v) }, `Min bet ${b.dataset.v}`)));
 document.querySelectorAll("#sells .opt").forEach((b) => (b.onclick = () => saveSettings({ copy_sells: b.dataset.v === "true" }, "Copy sells")));
 document.querySelectorAll("#slipcap .opt").forEach((b) => (b.onclick = () => saveSettings({ max_slip_cents: Number(b.dataset.v) }, `Max slippage ${b.dataset.v}`)));
