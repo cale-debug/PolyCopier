@@ -17,7 +17,7 @@ from typing import Optional
 
 from . import live_us, polymarket as pm
 from .portfolio import (DEFAULT_SETTINGS, add_total, bet_size, buy, exposure, log, mark, new_state,
-                        sell, should_copy_buy, skip, slip_ok, taker_fee, track_slip, TAKER_FEE)
+                        sell, should_copy_buy, blocked_league, skip, slip_ok, taker_fee, track_slip, TAKER_FEE)
 from .store import LocalStore, Store
 
 POLL = float(os.environ.get("POLL_SECONDS", "3"))
@@ -279,6 +279,9 @@ class Bot:
             why = should_copy_buy(self.settings, his_usd)
             if why:
                 return skip(self.state, why)
+            league = blocked_league(self.settings, t, us_slug)
+            if league:
+                return skip(self.state, f"{league.upper()} blocked")
             if self.settings.get("us_only", True) and not on_us:
                 return skip(self.state, no_match)
             if not on_us:

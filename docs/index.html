@@ -261,6 +261,7 @@ ol { padding-left: 20px; line-height: 1.6; } a { color: var(--neon); }
         <div><div class="label">Max delay (sec)</div><input id="fDelay" inputmode="decimal"></div>
         <div><div class="label">Max spread (&cent;)</div><input id="fSpread" inputmode="decimal"></div>
         <div><div class="label">Min $ at best price</div><input id="fDepth" inputmode="decimal"></div>
+        <div><div class="label">Never buy leagues (e.g. mls, nfl)</div><input id="blockLeagues" autocapitalize="off"></div>
       </div>
       <div class="hint">Max price above the trader's is the slippage setting on the DASH tab. Skipped copies and why are listed under Skipped.</div>
       <div class="label" style="margin-top:12px">PROP size (% of their bet)</div>
@@ -357,6 +358,7 @@ function renderSettings() {
   if (document.activeElement !== $("maxDd")) $("maxDd").value = settings.max_drawdown_pct ?? 25;
   if (document.activeElement !== $("maxBet")) $("maxBet").value = settings.max_per_bet ?? 0;
   if (document.activeElement !== $("minCash")) $("minCash").value = settings.min_cash ?? 0;
+  if (document.activeElement !== $("blockLeagues")) $("blockLeagues").value = settings.block_leagues || "";
 }
 
 function slip(t) {
@@ -528,6 +530,7 @@ $("fSpread").onchange = () => saveSettings({ max_spread_cents: Number($("fSpread
 $("fDepth").onchange = () => saveSettings({ min_depth_usd: Number($("fDepth").value) || 0 }, "Min liquidity");
 $("maxDd").onchange = () => saveSettings({ max_drawdown_pct: Number($("maxDd").value) || 25 }, "Max drawdown");
 $("maxBet").onchange = () => saveSettings({ max_per_bet: Number($("maxBet").value) || 0 }, "Max per bet");
+$("blockLeagues").onchange = () => saveSettings({ block_leagues: $("blockLeagues").value.toLowerCase().split(",").map((x) => x.trim()).filter(Boolean).join(", ") }, "Blocked leagues");
 $("minCash").onchange = () => saveSettings({ min_cash: Number($("minCash").value) || 0 }, "Min cash");
 $("propPct").onchange = () => saveSettings({ prop_pct: Number($("propPct").value) || 1 }, "Prop %");
 $("maxTrade").onchange = () => saveSettings({ live_max_trade: Number($("maxTrade").value) || 1 }, "Live max trade");

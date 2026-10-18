@@ -22,6 +22,7 @@ DEFAULT_SETTINGS = {
     "size_mode": "1",          # "1" | "2" | "5" | "prop"
     "prop_pct": 1.0,           # PROP: copy this % of his dollar size
     "min_his_bet": 0,          # skip his buys smaller than this ($)
+    "block_leagues": "",       # comma list of league prefixes to never buy (e.g. "mls")
     "us_only": True,           # only copy markets that also trade on Polymarket US
     "once_per_market": False,  # True: copy his first buy of an outcome, not every fill after it
     "skip_both_sides": False,  # True: don't buy the other side of a market we already hold
@@ -114,6 +115,20 @@ def category(trade: dict) -> str:
     """Rough market category from the slug's league prefix (mlb, nfl, epl, ...)."""
     slug = str(trade.get("eventSlug") or trade.get("slug") or "")
     return slug.split("-")[0] or "other"
+
+
+def blocked_league(settings: dict, trade: dict, us_slug: Optional[str] = None) -> Optional[str]:
+    """The blocked league this buy belongs to, if any. Checks the international slug's prefix
+    and the Polymarket US slug's league part (atc-mls-... -> mls)."""
+    raw = settings.get("block_leagues") or ""
+    blocked = {x.strip().lower() for x in (raw if isinstance(raw, list) else str(raw).split(",")) if x.strip()}
+    if not blocked:
+        return None
+    seen = {category(trade).lower()}
+    if us_slug and "-" in us_slug:
+        seen.add(us_slug.split("-")[1].lower())
+    hit = blocked & seen
+    return sorted(hit)[0] if hit else None
 
 
 def add_total(state: dict, **amounts) -> None:

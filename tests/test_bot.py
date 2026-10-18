@@ -234,6 +234,18 @@ def test_per_bet_cap_and_cash_floor(tmp_path, monkeypatch):
     assert bot.state["bank"] >= 50 and bot.state["skipped"]["would take cash under $50"] > 0
 
 
+def test_blocked_league_is_never_bought(tmp_path, monkeypatch):
+    monkeypatch.setattr(pm, "best_prices", lambda a: (0.38, 0.42))
+    monkeypatch.setattr(live_us, "us_market", lambda slug, event="": "atc-" + slug)
+    store = LocalStore(str(tmp_path))
+    store.write("settings.json", {**DEFAULT_SETTINGS, "size_mode": "5", "block_leagues": "MLS, epl"}, "")
+    bot = main.Bot(store)
+    bot.copy(dict(TRADE, asset="M", slug="mls-ner-chi-2026-10-17-ner", eventSlug="mls-ner-chi-2026-10-17"), 1)
+    assert "M" not in bot.state["positions"] and bot.state["skipped"]["MLS blocked"] == 1
+    bot.copy(dict(TRADE), 1)                             # other leagues still copy
+    assert "A" in bot.state["positions"]
+
+
 def test_per_bet_cap_is_shared_across_traders(tmp_path, monkeypatch):
     monkeypatch.setattr(pm, "best_prices", lambda a: (0.38, 0.42))
     monkeypatch.setattr(live_us, "us_market", lambda slug, event="": "atc-" + slug)
