@@ -230,6 +230,13 @@ ol { padding-left: 20px; line-height: 1.6; } a { color: var(--neon); }
       <button class="big lock" id="goPaper">BACK TO PAPER</button>
       <div class="hint" id="liveStatus"></div>
     </div>
+    <div class="panel">
+      <div class="label">Telegram alerts</div>
+      <div class="hint">A message for every bet placed, sold or settled. In Telegram, message <b>@BotFather</b>, send <b>/newbot</b>, pick any name, and paste the token it gives you here. Then open your new bot in Telegram and send it any message.</div>
+      <input id="tgToken" type="password" autocomplete="off" placeholder="123456789:AA…">
+      <button class="big lock" id="saveTg">SAVE TELEGRAM</button>
+      <div class="hint" id="tgStatus"></div>
+    </div>
   </section>
 
   <!-- ===================== SETUP ===================== -->
@@ -579,6 +586,17 @@ $("saveKeys").onclick = async () => {
     setTimeout(checkKeys, 1500);
   } catch (e) { $("keysStatus").textContent = "Saving keys failed (" + e.message + "). Check the token has Secrets: read and write."; }
 };
+$("saveTg").onclick = async () => {
+  if (!TOKEN) { toast("Connect your GitHub token in SETUP first"); return showTab("setup"); }
+  const t = $("tgToken").value.trim();
+  if (!/^\d+:[\w-]{20,}$/.test(t)) return toast("That doesn't look like a BotFather token");
+  try {
+    await putSecret("TELEGRAM_BOT_TOKEN", t);
+    $("tgToken").value = "";
+    $("tgStatus").textContent = "Saved as a GitHub Secret. Restarting the bot; then send your Telegram bot any message.";
+    restartBot();
+  } catch (e) { $("tgStatus").textContent = "Saving failed (" + e.message + "). Check the token has Secrets: read and write."; }
+};
 $("goLive").onclick = async () => {
   const typed = prompt(`Real money. Max ${usd(settings.live_max_trade)} per trade, ${usd(settings.live_daily_cap)} per day. Type LIVE to confirm.`);
   if (typed === "LIVE" && (await saveSettings({ mode: "live", halted: false }, "Go live"))) restartBot();
@@ -612,6 +630,9 @@ async function checkKeys() {
     if (!r.ok) return ($("keysStatus").textContent = `Can't see saved keys (${r.status}): the token needs Secrets access.`);
     const names = ((await r.json()).secrets || []).reduce((m, x) => ((m[x.name] = x.updated_at), m), {});
     const have = ["POLYMARKET_KEY_ID", "POLYMARKET_SECRET_KEY"].filter((n) => names[n]);
+    const tg = state && state.telegram;
+    $("tgStatus").textContent = !names.TELEGRAM_BOT_TOKEN ? "Not set up yet."
+      : tg && tg.chat ? "Alerts are on." : "Token saved. Send your Telegram bot any message to finish.";
     $("keysStatus").textContent = have.length === 2 ? `Polymarket keys are saved (last changed ${new Date(names.POLYMARKET_SECRET_KEY).toLocaleString()}).`
       : have.length ? `Only ${have[0]} is saved. Enter both keys and SAVE KEYS again.` : "No Polymarket keys saved yet.";
   } catch (e) { $("keysStatus").textContent = "Couldn't check saved keys: " + e.message; }

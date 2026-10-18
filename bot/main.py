@@ -16,6 +16,7 @@ import time
 from typing import Optional
 
 from . import live_us, polymarket as pm
+from .notify import Notifier
 from .portfolio import (DEFAULT_SETTINGS, add_total, bet_size, buy, exposure, log, mark, new_state,
                         sell, should_copy_buy, blocked_league, skip, slip_ok, taker_fee, track_slip, TAKER_FEE)
 from .store import LocalStore, Store
@@ -39,6 +40,7 @@ class Bot:
         self.settings = self.load_settings()
         self.mode = self.effective_mode()
         self.state = self.load_state()
+        self.notifier = Notifier()
         self.dirty = True
 
     # ------------------------------------------------------------ settings --
@@ -658,6 +660,8 @@ class Bot:
                 if now - last_upkeep > UPKEEP_EVERY:
                     self.upkeep()
                     last_upkeep = now
+                    self.dirty = True
+                if self.notifier.flush(self.state, self.mode):
                     self.dirty = True
                 # Save only when something changed (plus a slow heartbeat), so viewers
                 # can poll every 15s without burning through GitHub's rate limit.

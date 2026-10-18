@@ -477,3 +477,26 @@ def test_orders_round_to_tick_in_our_favour(monkeypatch):
     assert sent[0]["price"]["value"] == "0.5400" and sent[0]["outcomeSide"] == "OUTCOME_SIDE_NO"
     no_fill = {"executions": [{"lastShares": "10.86", "lastPx": {"value": "0.56"}}]}
     assert abs(live_us.filled(no_fill, long=False)[1] - 0.44) < 1e-9
+
+
+def test_telegram_alerts_batch_fills_and_never_replay(monkeypatch):
+    from bot import notify
+    sent = []
+    def call(token, method, **p):
+        if method == "getUpdates":
+            return [{"message": {"chat": {"id": 42}}}]
+        sent.append(p["text"])
+        return {"message_id": 1}
+    monkeypatch.setattr(notify, "_call", call)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    n = notify.Notifier()
+    state = {"trades": [{"side": "BUY", "title": "Old", "outcome": "Yes", "usd": 5, "ts": 1}]}
+    assert n.flush(state, "live")                   # first pass only sets the starting line
+    assert n.flush(state, "live") and state["telegram"]["chat"] == "42" and len(sent) == 1  # hello only
+    t = state["telegram"]["sent_ts"] + 1
+    state["trades"][:0] = [{"side": "BUY", "title": "Wisconsin vs. UCLA", "outcome": "Wisconsin", "usd": 25,
+                            "shares": 147, "ts": t, "who": "0x20d643"}] * 2
+    assert n.flush(state, "live")
+    assert len(sent) == 2 and "Bought $50.00 at 17¢" in sent[1] and "from 0x20d643" in sent[1]
+    assert not n.flush(state, "live") and len(sent) == 2   # nothing new, nothing sent

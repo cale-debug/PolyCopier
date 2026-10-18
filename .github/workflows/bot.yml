@@ -43,3 +43,4 @@ jobs:
           RUN_MINUTES: ${{ inputs.run_minutes || '340' }}
           POLYMARKET_KEY_ID: ${{ secrets.POLYMARKET_KEY_ID }}
           POLYMARKET_SECRET_KEY: ${{ secrets.POLYMARKET_SECRET_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
