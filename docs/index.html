@@ -472,7 +472,7 @@ function renderState() {
     const hp = h.pnl || {};
     return `<div>&gt; ${esc(h.label || "trader")}: ${h.buys} buys · ${h.sells} sells · ${big(h.usd)} traded since we started copying · their P&amp;L since then ${sgn(hp.since_copy)} · today ${sgn(hp.day)} · month ${sgn(hp.month)} · all-time ${sgn(hp.all)}</div>`;
   }).join("");
-  drawEquity(state.equity || []);
+  drawEquity(state, pnl);
   renderReport();
   const wantLive = settings && settings.mode === "live";
   $("modebar").textContent = live ? "LIVE MODE // REAL MONEY" : wantLive ? "LIVE REQUESTED // STILL PAPER: " + (state.live_error || "starting up") : "PAPER MODE // NO REAL MONEY";
@@ -485,17 +485,30 @@ function renderState() {
     : wantLive ? "Live requested but still on paper: " + (state.live_error || "the bot is restarting.") : "Paper mode. Nothing real is being bought.";
 }
 
-function drawEquity(pts) {
+function drawEquity(st, pnlNow) {
+  // P&L stepping once per closed trade (each net result, oldest first), so every win and loss
+  // shows; a dashed tail runs to today's total P&L, which includes open positions. Drawn as
+  // P&L rather than balance so deposits and withdrawals don't show up as wins or losses.
   const c = $("eq"), dpr = window.devicePixelRatio || 1, w = c.clientWidth, h = 120;
   c.width = w * dpr; c.height = h * dpr; const g = c.getContext("2d"); g.scale(dpr, dpr); g.clearRect(0, 0, w, h);
-  if (pts.length < 2) return;
-  const ys = pts.map((p) => p[1]), lo = Math.min(...ys), hi = Math.max(...ys), span = hi - lo || 1;
-  const x = (i) => (i / (pts.length - 1)) * (w - 4) + 2, y = (v) => h - 8 - ((v - lo) / span) * (h - 20);
-  g.beginPath(); pts.forEach((p, i) => (i ? g.lineTo(x(i), y(p[1])) : g.moveTo(x(i), y(p[1]))));
+  const closed = (st.closed || []).slice().reverse();
+  const pts = [0];
+  closed.forEach((r) => pts.push(pts[pts.length - 1] + r.net));
+  const all = pts.concat(pnlNow), lo = Math.min(...all), hi = Math.max(...all), span = hi - lo || 1;
+  const n = pts.length, x = (i) => (i / n) * (w - 10) + 4, y = (v) => h - 8 - ((v - lo) / span) * (h - 20);
+  g.strokeStyle = "rgba(127,149,184,.5)"; g.setLineDash([4, 4]); g.beginPath(); g.moveTo(0, y(0)); g.lineTo(w, y(0)); g.stroke();
+  // Today's P&L, dashed, from the last closed trade.
+  g.strokeStyle = "rgba(92,200,255,.6)"; g.beginPath(); g.moveTo(x(n - 1), y(pts[n - 1])); g.lineTo(x(n), y(pnlNow)); g.stroke(); g.setLineDash([]);
+  if (n < 2) return;
+  g.beginPath(); pts.forEach((v, i) => (i ? (g.lineTo(x(i), y(pts[i - 1])), g.lineTo(x(i), y(v))) : g.moveTo(x(0), y(v))));
   g.strokeStyle = "#5cc8ff"; g.lineWidth = 2; g.shadowColor = "rgba(92,200,255,.6)"; g.shadowBlur = 10; g.stroke();
-  g.shadowBlur = 0; g.lineTo(x(pts.length - 1), h); g.lineTo(x(0), h); g.closePath();
+  g.shadowBlur = 0; g.lineTo(x(n - 1), h); g.lineTo(x(0), h); g.closePath();
   const grad = g.createLinearGradient(0, 0, 0, h); grad.addColorStop(0, "rgba(92,200,255,.22)"); grad.addColorStop(1, "rgba(61,123,255,0)");
   g.fillStyle = grad; g.fill();
+  // A dot on each trade: green for a win, red for a loss.
+  if (n <= 200) closed.forEach((r, i) => {
+    g.fillStyle = r.net >= 0 ? "#3ee6a8" : "#ff5a6e"; g.beginPath(); g.arc(x(i + 1), y(pts[i + 1]), 2.5, 0, 7); g.fill();
+  });
 }
 
 async function refresh() {

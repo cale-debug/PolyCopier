@@ -269,7 +269,9 @@ def mark(state: dict) -> None:
     """Append an equity point (cash + marked positions), thinned to one per 10 min."""
     now = int(time.time())
     eq = round(state["bank"] + exposure(state), 2)
-    if state["equity"] and now - state["equity"][-1][0] < 600:
+    # Same 10-minute slot: update the last point. (Comparing against the last point's own
+    # time, which each save moved forward, kept frequent saves from ever adding a point.)
+    if state["equity"] and now // 600 == state["equity"][-1][0] // 600:
         state["equity"][-1] = [now, eq]
     else:
         state["equity"].append([now, eq])
