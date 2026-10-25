@@ -562,3 +562,25 @@ def test_translate_refuses_when_unsure(monkeypatch):
     assert live_us.same_team("PRV", "PARIVISION") and live_us.same_team("Rockets", "HOU Rockets")
     assert live_us._slug_variants("cs2-g2-aur1-2026-10-25", "cs2-g2-aur1-2026-10-25")[:3] == \
         ["cs2-g2-aur1-2026-10-25", "cs2-g2-aur-2026-10-25", "cs2-g-aur1-2026-10-25"]
+
+
+def test_unfilled_live_sell_is_retried_until_it_goes_through(tmp_path, monkeypatch):
+    monkeypatch.setattr(pm, "best_prices", lambda a: (0.38, 0.42))
+    monkeypatch.setattr(live_us, "us_market", lambda slug, event="": "atc-" + slug)
+    store = LocalStore(str(tmp_path))
+    store.write("settings.json", {**DEFAULT_SETTINGS, "size_mode": "5", "max_exposure_pct": 100}, "")
+    bot = main.Bot(store)
+    bot.copy(dict(TRADE), 1)
+    pos = bot.state["positions"]["A"]
+    bot.mode = "live"
+    monkeypatch.setattr(bot, "us_side", lambda p: True)
+    asked, fills = [], [0.0, pos["shares"] / 2, pos["shares"]]
+    monkeypatch.setattr(live_us, "place", lambda slug, long, action, qty, limit: asked.append(qty) or {})
+    monkeypatch.setattr(live_us, "filled", lambda resp, long: (min(fills.pop(0), asked[-1]), 0.38, None))
+    total = pos["shares"]
+    bot.copy(dict(TRADE, side="SELL", size=1000), 1)        # they sell out; nobody is buying
+    assert "A" in bot.state["positions"] and abs(pos["sell_owed"] - total) < 1e-6
+    bot.retry_sells()                                         # half goes through
+    assert abs(pos["sell_owed"] - total / 2) < 1e-6 and abs(pos["shares"] - total / 2) < 1e-6
+    bot.retry_sells()                                         # the rest goes through
+    assert "A" not in bot.state["positions"] and asked == [total, total, total / 2]

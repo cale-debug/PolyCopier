@@ -27,6 +27,7 @@ UPKEEP_EVERY = int(os.environ.get("UPKEEP_SECONDS", "120"))    # re-price open p
 HEARTBEAT_EVERY = int(os.environ.get("HEARTBEAT_SECONDS", "300"))
 UPKEEP_BATCH = int(os.environ.get("UPKEEP_BATCH", "150"))
 MAX_POSITIONS = int(os.environ.get("MAX_POSITIONS", "1500"))
+RETRY_SELLS_EVERY = int(os.environ.get("RETRY_SELLS_SECONDS", "20"))  # retry unfilled sells
 RUN_SECONDS = int(float(os.environ.get("RUN_MINUTES") or 340) * 60)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -494,21 +495,52 @@ class Bot:
         self.seed_his_shares(pos, float(t.get("size") or 0), t.get("_wallet") or self.target())
 
     def live_sell(self, asset: str, fraction: float, why: str = "copied sell") -> None:
+        """Sell `fraction` of the position, plus whatever earlier sells still owe. Whatever
+        doesn't fill is remembered in pos["sell_owed"] and retried until it goes through."""
         pos = self.state["positions"][asset]
+        owed = float(pos.get("sell_owed", 0.0))
+        want = min(pos["shares"], pos["shares"] * fraction + owed)
+        if want <= 0:
+            return
         if not pos.get("us_slug") or self.us_side(pos) is None:
+            pos.pop("sell_owed", None)
             return skip(self.state, "can't place sell on Polymarket US")
         bid, _ = live_us.quote(pos["us_slug"], pos["long"])
         limit = max(0.01, (bid or pos.get("cur", 0.5)) - 0.02)
         try:
-            resp = live_us.place(pos["us_slug"], pos["long"], "SELL", pos["shares"] * fraction, limit)
+            resp = live_us.place(pos["us_slug"], pos["long"], "SELL", want, limit)
         except Exception as exc:
-            log(self.state, f"Sell failed: {exc}")
+            if not owed:
+                log(self.state, f"Sell failed ({exc}); will keep retrying")
+            pos["sell_owed"] = want
             return skip(self.state, "order error")
         shares, px, reported = live_us.filled(resp, pos["long"])
-        if shares <= 0:
-            return skip(self.state, "sell not filled")
-        sell(self.state, asset, min(1.0, shares / pos["shares"]), px, why,
-             fee=None if reported is None else round(reported, 2))
+        left = want - max(shares, 0.0)
+        if shares <= 0 and (resp or {}).get("skipped"):
+            # Too small for the market's minimum order: no retry can ever fill it.
+            pos.pop("sell_owed", None)
+            return skip(self.state, "sell too small to place")
+        if left > 0.01:
+            if not owed:
+                log(self.state, f"{pos['title']}: {left:.2f} shares didn't sell; will keep retrying")
+                skip(self.state, "sell not filled (retrying)")
+            pos["sell_owed"] = left
+        else:
+            pos.pop("sell_owed", None)
+        if shares > 0:
+            sell(self.state, asset, min(1.0, shares / pos["shares"]), px, why,
+                 fee=None if reported is None else round(reported, 2))
+            if left <= 0.01 and owed:
+                log(self.state, f"{pos['title']}: retried sell went through")
+            self.dirty = True
+
+    def retry_sells(self) -> None:
+        """Keep trying sells that didn't fill, so we get out when the trader got out."""
+        if self.mode != "live":
+            return
+        for asset, pos in list(self.state["positions"].items()):
+            if pos.get("sell_owed", 0) > 0:
+                self.live_sell(asset, 0.0, "copied sell (retried)")
 
     def halt(self, why: str) -> None:
         log(self.state, why)
@@ -648,7 +680,7 @@ class Bot:
 
     def run(self) -> None:
         start = time.time()
-        last_save = last_settings = last_upkeep = 0.0
+        last_save = last_settings = last_upkeep = last_retry = 0.0
         log(self.state, f"Runner started ({self.mode})")
         while time.time() - start < RUN_SECONDS:
             now = time.time()
@@ -661,6 +693,9 @@ class Bot:
                     self.upkeep()
                     last_upkeep = now
                     self.dirty = True
+                if now - last_retry > RETRY_SELLS_EVERY:
+                    self.retry_sells()
+                    last_retry = now
                 if self.notifier.flush(self.state, self.mode):
                     self.dirty = True
                 # Save only when something changed (plus a slow heartbeat), so viewers
