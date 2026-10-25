@@ -500,3 +500,65 @@ def test_telegram_alerts_batch_fills_and_never_replay(monkeypatch):
     assert n.flush(state, "live")
     assert len(sent) == 2 and "Bought $50.00 at 17¢" in sent[1] and "from 0x20d643" in sent[1]
     assert not n.flush(state, "live") and len(sent) == 2   # nothing new, nothing sent
+
+
+def _us_fixture(monkeypatch, events, markets, search=(), teams=()):
+    """Fake Polymarket US: events {slug: [(market slug, question)]}, markets {slug: sides}."""
+    for f in (live_us.us_event, live_us._us_markets, live_us._search, live_us._intl_teams, live_us._us_event):
+        f.cache_clear()
+    monkeypatch.setattr(live_us, "_us_markets", lambda ev: tuple(events.get(ev, ())))
+    monkeypatch.setattr(live_us, "_us_event", lambda ev: tuple(s for s, _ in events.get(ev, ())))
+    monkeypatch.setattr(live_us, "_search", lambda q: tuple(search))
+    monkeypatch.setattr(live_us, "_intl_teams", lambda ev: tuple(teams))
+    monkeypatch.setattr(live_us, "_market", lambda slug: (markets.get(slug, ()), 0.0695, False))
+
+
+def test_translate_finds_renamed_nba_game_and_its_spreads_and_totals(monkeypatch):
+    ev = "nba-gs-pho-2026-10-24"
+    q = "Will the GS Warriors cover {} vs the PHO Suns in GS Warriors vs. PHO Suns?"
+    _us_fixture(monkeypatch,
+                {ev: [(f"aec-{ev}", "Who will win in the upcoming basketball event GS Warriors vs PHO Suns scheduled for ..."),
+                      (f"asc-{ev}-pos-9pt5", q.format("9.5")), (f"asc-{ev}-neg-9pt5", q.format("-9.5")),
+                      (f"asc-{ev}-q4-pos-9pt5", q.format("9.5")), (f"tsc-{ev}-219pt5", "Will the total ... be more than 219.5?"),
+                      (f"tsc-{ev}-sh-219pt5", "second half")]},
+                {f"aec-{ev}": ((("warriors",), True), (("suns",), False))},
+                search=[(ev, "GS Warriors vs. PHO Suns"), ("nba-pho-gs-2026-11-02", "PHO Suns vs. GS Warriors")],
+                teams=["Warriors", "Suns"])
+    intl = "nba-gsw-phx-2026-10-24"
+    assert live_us.us_event(intl) == ev                                  # different team codes, found by search
+    assert live_us.match(intl, intl, "Suns", "Warriors vs. Suns") == (f"aec-{ev}", False, "")
+    # Suns -9.5 == Warriors fail to cover +9.5; Warriors +9.5 == Warriors cover +9.5.
+    sp = f"{intl}-spread-home-9pt5"
+    assert live_us.match(sp, intl, "Suns", "Spread: Suns (-9.5)") == (f"asc-{ev}-pos-9pt5", False, "")
+    assert live_us.match(sp, intl, "Warriors", "Spread: Suns (-9.5)") == (f"asc-{ev}-pos-9pt5", True, "")
+    assert live_us.match(f"{intl}-total-219pt5", intl, "Over", "Warriors vs. Suns: O/U 219.5") == (f"tsc-{ev}-219pt5", True, "")
+    assert live_us.match(f"{intl}-total-219pt5", intl, "Under", "x") == (f"tsc-{ev}-219pt5", False, "")
+    assert live_us.match(f"{intl}-total-221pt5", intl, "Over", "x")[2] == "not on Polymarket US"   # line US doesn't list
+
+
+def test_translate_moneyline_nicknames_and_esports_handicap(monkeypatch):
+    cfb = "cfb-sjst-nevada-2026-10-24"
+    cs = "cs2-fnc-prv-2026-10-20"
+    _us_fixture(monkeypatch,
+                {cfb: [(f"aec-{cfb}", "Who will win in the upcoming football event San Jose State vs Nevada scheduled for ...")],
+                 cs: [(f"aec-{cs}", "..."), (f"asc-{cs}-hcap-pos-1pt5", "Will the fnatic cover 1.5 vs the PARIVISION in fnatic vs. PARIVISION?"),
+                      (f"tsc-{cs}-tot-2pt5", "Will the total ... be more than 2.5?")]},
+                {f"aec-{cfb}": ((("spartans",), True), (("wolf pack",), False))},
+                teams=["fnatic", "PARIVISION"])
+    assert live_us.match(cfb, cfb, "Nevada", "San Jose State vs. Nevada") == (f"aec-{cfb}", False, "")
+    t = "Map Handicap: PRV (-1.5) vs fnatic (+1.5)"
+    assert live_us.match(f"{cs}-map-handicap-home-1pt5", cs, "fnatic", t) == (f"asc-{cs}-hcap-pos-1pt5", True, "")
+    assert live_us.match(f"{cs}-map-handicap-home-1pt5", cs, "PARIVISION", t) == (f"asc-{cs}-hcap-pos-1pt5", False, "")
+    assert live_us.match(f"{cs}-total-2pt5", cs, "Over", "x") == (f"tsc-{cs}-tot-2pt5", True, "")
+
+
+def test_translate_refuses_when_unsure(monkeypatch):
+    ev = "nba-gs-pho-2026-10-24"
+    _us_fixture(monkeypatch, {ev: [(f"aec-{ev}", "x")], "nba-gs-pho-2026-10-25": [("aec-y", "x")]}, {},
+                search=[(ev, "GS Warriors vs. PHO Suns"), ("nba-gs-pho-2026-10-25", "GS Warriors vs. PHO Suns")],
+                teams=["Warriors", "Suns"])
+    assert live_us.us_event("nba-gsw-phx-2026-10-24") is None            # two candidate games: don't guess
+    assert not live_us.same_team("LA Lakers", "LA Clippers") and not live_us.same_team("Nets", "NO Pelicans")
+    assert live_us.same_team("PRV", "PARIVISION") and live_us.same_team("Rockets", "HOU Rockets")
+    assert live_us._slug_variants("cs2-g2-aur1-2026-10-25", "cs2-g2-aur1-2026-10-25")[:3] == \
+        ["cs2-g2-aur1-2026-10-25", "cs2-g2-aur-2026-10-25", "cs2-g-aur1-2026-10-25"]

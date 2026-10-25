@@ -268,7 +268,7 @@ class Bot:
         who = {"who": t.get("_who") or (dict(self.targets()).get(wallet) or wallet[:8]), "wallet": wallet}
         asset = str(t.get("asset"))
         his_usd = float(t.get("usdcSize") or 0) or float(t.get("size") or 0) * float(t.get("price") or 0)
-        us_slug, long, no_match = live_us.match(t.get("slug") or "", t.get("eventSlug") or "", t.get("outcome"))
+        us_slug, long, no_match = live_us.match(t.get("slug") or "", t.get("eventSlug") or "", t.get("outcome"), t.get("title") or "")
         on_us = us_slug is not None
         his_size = float(t.get("size") or 0)
         if side == "BUY":
@@ -548,7 +548,7 @@ class Bot:
         if not pos.get("us_slug") and pos.get("slug") and "us_checked" not in pos:
             # Opened before US matching was stored: look the contract up once.
             pos["us_checked"] = True
-            us_slug, long, _ = live_us.match(pos["slug"], pos.get("event_slug") or pos["slug"], pos.get("outcome"))
+            us_slug, long, _ = live_us.match(pos["slug"], pos.get("event_slug") or pos["slug"], pos.get("outcome"), pos.get("title") or "")
             if us_slug:
                 pos.update(us_slug=us_slug, long=long, us=True)
         if pos.get("us_slug") and self.us_side(pos) is not None:
