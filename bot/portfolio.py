@@ -23,6 +23,7 @@ DEFAULT_SETTINGS = {
     "prop_pct": 1.0,           # PROP: copy this % of his dollar size
     "min_his_bet": 0,          # skip his buys smaller than this ($)
     "block_leagues": "",       # comma list of league prefixes to never buy (e.g. "mls")
+    "trader_leagues": {},      # wallet -> comma list of the only leagues to copy from that trader
     "us_only": True,           # only copy markets that also trade on Polymarket US
     "once_per_market": False,  # True: copy his first buy of an outcome, not every fill after it
     "skip_both_sides": False,  # True: don't buy the other side of a market we already hold
@@ -117,18 +118,33 @@ def category(trade: dict) -> str:
     return slug.split("-")[0] or "other"
 
 
-def blocked_league(settings: dict, trade: dict, us_slug: Optional[str] = None) -> Optional[str]:
-    """The blocked league this buy belongs to, if any. Checks the international slug's prefix
-    and the Polymarket US slug's league part (atc-mls-... -> mls)."""
-    raw = settings.get("block_leagues") or ""
-    blocked = {x.strip().lower() for x in (raw if isinstance(raw, list) else str(raw).split(",")) if x.strip()}
-    if not blocked:
-        return None
+def _leagues(raw) -> set:
+    return {x.strip().lower() for x in (raw if isinstance(raw, list) else str(raw or "").split(",")) if x.strip()}
+
+
+def trade_leagues(trade: dict, us_slug: Optional[str] = None) -> set:
+    """League codes a trade belongs to: the international slug's prefix and the Polymarket US
+    slug's league part (aec-cfb-... -> cfb)."""
     seen = {category(trade).lower()}
     if us_slug and "-" in us_slug:
         seen.add(us_slug.split("-")[1].lower())
-    hit = blocked & seen
+    return seen - {"", "other"}
+
+
+def blocked_league(settings: dict, trade: dict, us_slug: Optional[str] = None) -> Optional[str]:
+    """The blocked league this buy belongs to, if any."""
+    hit = _leagues(settings.get("block_leagues")) & trade_leagues(trade, us_slug)
     return sorted(hit)[0] if hit else None
+
+
+def league_not_allowed(settings: dict, wallet: str, trade: dict, us_slug: Optional[str] = None) -> Optional[str]:
+    """If this trader is limited to some leagues (settings.trader_leagues[wallet]) and this buy
+    isn't in one of them, the league it is in (or "other"); otherwise None."""
+    allow = _leagues((settings.get("trader_leagues") or {}).get(wallet.lower()))
+    if not allow:
+        return None
+    seen = trade_leagues(trade, us_slug)
+    return None if allow & seen else (sorted(seen)[0] if seen else "other")
 
 
 def add_total(state: dict, **amounts) -> None:

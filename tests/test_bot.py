@@ -584,3 +584,19 @@ def test_unfilled_live_sell_is_retried_until_it_goes_through(tmp_path, monkeypat
     assert abs(pos["sell_owed"] - total / 2) < 1e-6 and abs(pos["shares"] - total / 2) < 1e-6
     bot.retry_sells()                                         # the rest goes through
     assert "A" not in bot.state["positions"] and asked == [total, total, total / 2]
+
+
+def test_trader_limited_to_some_leagues(tmp_path, monkeypatch):
+    monkeypatch.setattr(pm, "best_prices", lambda a: (0.38, 0.42))
+    monkeypatch.setattr(live_us, "us_market", lambda slug, event="": "aec-" + slug)
+    store = LocalStore(str(tmp_path))
+    store.write("settings.json", {**DEFAULT_SETTINGS, "size_mode": "5", "target": "0xa,0xb", "target_label": "ic4cream, other",
+                                  "trader_leagues": {"0xa": "cfb, nfl, nhl"}}, "")
+    bot = main.Bot(store)
+    nba = dict(TRADE, asset="N", slug="nba-bos-nyk-2026-10-27", eventSlug="nba-bos-nyk-2026-10-27")
+    nfl = dict(TRADE, asset="F", slug="nfl-kc-buf-2026-10-27", eventSlug="nfl-kc-buf-2026-10-27")
+    bot.copy(dict(nba, _wallet="0xa", _who="ic4cream"), 1)
+    bot.copy(dict(nfl, _wallet="0xa", _who="ic4cream"), 1)
+    bot.copy(dict(nba, asset="N2", _wallet="0xb", _who="other"), 1)   # no limits on other traders
+    assert "N" not in bot.state["positions"] and "F" in bot.state["positions"] and "N2" in bot.state["positions"]
+    assert bot.state["skipped"]["NBA not allowed for ic4cream"] == 1
