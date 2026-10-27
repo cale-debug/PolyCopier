@@ -17,7 +17,7 @@
   "max_exposure_pct": 100,
   "max_drawdown_pct": 100,
   "reset_paper": false,
-  "max_per_bet": 50,
+  "max_per_bet": 25,
   "min_cash": 5,
   "block_leagues": "mls"
 }
