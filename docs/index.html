@@ -148,6 +148,14 @@ ol { padding-left: 20px; line-height: 1.6; } a { color: var(--neon); }
           <div class="hint" id="propHint"></div>
         </div>
         <div>
+          <div class="label">Max in one bet</div>
+          <div class="row" id="maxbetopt">
+            <button class="opt" data-v="25">$25</button><button class="opt" data-v="50">$50</button>
+            <button class="opt" data-v="100">$100</button><button class="opt" data-v="0">NO CAP</button>
+          </div>
+          <div class="hint">Once you have this much in one bet, more entries into it are skipped, whichever trader makes them.</div>
+        </div>
+        <div>
           <div class="label">Min trader bet</div>
           <div class="row" id="minbet">
             <button class="opt" data-v="0">ALL</button><button class="opt" data-v="100">$100</button>
@@ -350,7 +358,7 @@ function renderSettings() {
   if (document.activeElement !== $("target")) $("target").value = settings.target_label || settings.target || "";
   const nT = (settings.target || "").split(",").filter((w) => w.trim()).length;
   $("locked").textContent = nT > 1 ? `> locked on ${nT} traders: ${settings.target_label || ""}` : `> locked: ${settings.target_label || ""} [${(settings.target || "").slice(0, 12)}…]`;
-  setOpts("size", settings.size_mode); setOpts("minbet", settings.min_his_bet); setOpts("sells", settings.copy_sells); setOpts("usonly", settings.us_only !== false); setOpts("slipcap", settings.max_slip_cents ?? 1);
+  setOpts("size", settings.size_mode); setOpts("maxbetopt", Number(settings.max_per_bet || 0)); setOpts("minbet", settings.min_his_bet); setOpts("sells", settings.copy_sells); setOpts("usonly", settings.us_only !== false); setOpts("slipcap", settings.max_slip_cents ?? 1);
   setOpts("startBank", settings.paper_start_bank);
   $("propHint").textContent = settings.size_mode === "prop" ? `PROP = ${settings.prop_pct}% of the trader's dollar size` : "";
   $("haltBtn").textContent = settings.halted ? "RESUME" : "HALT";
@@ -535,6 +543,7 @@ document.querySelectorAll("#size .opt").forEach((b) => (b.onclick = () => {
   if (n && settings && n > Number(settings.live_max_trade || 0)) patch.live_max_trade = n;
   saveSettings(patch, `Size ${b.dataset.v}`);
 }));
+document.querySelectorAll("#maxbetopt .opt").forEach((b) => (b.onclick = () => saveSettings({ max_per_bet: Number(b.dataset.v) }, `Max per bet ${b.dataset.v}`)));
 document.querySelectorAll("#minbet .opt").forEach((b) => (b.onclick = () => saveSettings({ min_his_bet: Number(b.dataset.v) }, `Min bet ${b.dataset.v}`)));
 document.querySelectorAll("#sells .opt").forEach((b) => (b.onclick = () => saveSettings({ copy_sells: b.dataset.v === "true" }, "Copy sells")));
 document.querySelectorAll("#slipcap .opt").forEach((b) => (b.onclick = () => saveSettings({ max_slip_cents: Number(b.dataset.v) }, `Max slippage ${b.dataset.v}`)));
