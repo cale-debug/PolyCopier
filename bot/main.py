@@ -370,6 +370,9 @@ class Bot:
     def price_filter(self, b: dict, his_price: float, delay: int) -> Optional[str]:
         """Why this copy is too late, too thin, too wide or too expensive to take; None if it's fine."""
         st = self.settings
+        top = float(st.get("max_entry_cents", 0) or 0)
+        if top and max(b["ask"], his_price) * 100 >= top - 1e-9:
+            return f"price {top:.0f}¢ or higher"
         if delay > float(st.get("max_delay_s", 60)):
             return f"copy too late (over {int(float(st.get('max_delay_s', 60)))}s)"
         if b.get("spread") is not None and b["spread"] * 100 > float(st.get("max_spread_cents", 5)) + 1e-9:
@@ -469,6 +472,9 @@ class Bot:
         # anything that can't fill at that price or better is cancelled, never chased.
         limit = his_price + float(cap) / 100 if cap is not None and float(cap) >= 0 else ask
         limit = min(0.99, max(limit, 0.01))
+        top = float(self.settings.get("max_entry_cents", 0) or 0)
+        if top:
+            limit = min(limit, (top - 1) / 100)  # never fill at the price cap or above
         try:
             resp = live_us.place(us_slug, long, "BUY", usd / limit, limit)
         except Exception as exc:

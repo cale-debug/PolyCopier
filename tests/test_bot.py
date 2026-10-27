@@ -600,3 +600,16 @@ def test_trader_limited_to_some_leagues(tmp_path, monkeypatch):
     bot.copy(dict(nba, asset="N2", _wallet="0xb", _who="other"), 1)   # no limits on other traders
     assert "N" not in bot.state["positions"] and "F" in bot.state["positions"] and "N2" in bot.state["positions"]
     assert bot.state["skipped"]["NBA not allowed for ic4cream"] == 1
+
+
+def test_no_buys_at_or_above_the_entry_price_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(live_us, "us_market", lambda slug, event="": "atc-" + slug)
+    store = LocalStore(str(tmp_path))
+    store.write("settings.json", {**DEFAULT_SETTINGS, "size_mode": "5", "max_entry_cents": 90, "max_slip_cents": -1}, "")
+    bot = main.Bot(store)
+    monkeypatch.setattr(pm, "best_prices", lambda a: (0.88, 0.90))
+    bot.copy(dict(TRADE, price=0.89), 1)
+    assert "A" not in bot.state["positions"] and bot.state["skipped"]["price 90¢ or higher"] == 1
+    monkeypatch.setattr(pm, "best_prices", lambda a: (0.87, 0.89))
+    bot.copy(dict(TRADE, price=0.89, transactionHash="0x2"), 1)
+    assert "A" in bot.state["positions"]

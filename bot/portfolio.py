@@ -23,6 +23,7 @@ DEFAULT_SETTINGS = {
     "prop_pct": 1.0,           # PROP: copy this % of his dollar size
     "min_his_bet": 0,          # skip his buys smaller than this ($)
     "block_leagues": "",       # comma list of league prefixes to never buy (e.g. "mls")
+    "max_entry_cents": 0,      # never buy at this price (in cents) or higher; 0 = no limit
     "trader_leagues": {},      # wallet -> comma list of the only leagues to copy from that trader
     "us_only": True,           # only copy markets that also trade on Polymarket US
     "once_per_market": False,  # True: copy his first buy of an outcome, not every fill after it
