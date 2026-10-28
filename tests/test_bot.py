@@ -641,3 +641,15 @@ def test_no_spread_on_the_other_team_of_a_game_we_hold(tmp_path, monkeypatch):
     bot.copy(dict(game, asset="OU", slug="nfl-bal-no-2026-11-02-total", outcome="Over", conditionId="ou"), 1)
     assert sorted(bot.state["positions"]) == ["ML", "OU", "SP2"]
     assert bot.state["skipped"]["other team in a game we hold"] == 1
+
+
+def test_trader_blocked_from_one_league(tmp_path, monkeypatch):
+    monkeypatch.setattr(pm, "best_prices", lambda a: (0.38, 0.42))
+    monkeypatch.setattr(live_us, "us_market", lambda slug, event="": "aec-" + slug)
+    store = LocalStore(str(tmp_path))
+    store.write("settings.json", {**DEFAULT_SETTINGS, "size_mode": "5", "target": "0xa", "target_label": "Nooserac",
+                                  "trader_block_leagues": {"0xa": "nba"}}, "")
+    bot = main.Bot(store)
+    bot.copy(dict(TRADE, asset="N", slug="nba-bos-nyk-2026-10-27", _wallet="0xa", _who="Nooserac"), 1)
+    bot.copy(dict(TRADE, asset="H", slug="nhl-bos-nyr-2026-10-27", _wallet="0xa", _who="Nooserac"), 1)
+    assert list(bot.state["positions"]) == ["H"] and bot.state["skipped"]["NBA not allowed for Nooserac"] == 1

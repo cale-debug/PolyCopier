@@ -25,6 +25,7 @@ DEFAULT_SETTINGS = {
     "block_leagues": "",       # comma list of league prefixes to never buy (e.g. "mls")
     "max_entry_cents": 0,      # never buy at this price (in cents) or higher; 0 = no limit
     "trader_leagues": {},      # wallet -> comma list of the only leagues to copy from that trader
+    "trader_block_leagues": {},  # wallet -> comma list of leagues never to copy from that trader
     "us_only": True,           # only copy markets that also trade on Polymarket US
     "once_per_market": False,  # True: copy his first buy of an outcome, not every fill after it
     "skip_both_sides": False,  # True: don't buy the other side of a market we already hold
@@ -139,12 +140,16 @@ def blocked_league(settings: dict, trade: dict, us_slug: Optional[str] = None) -
 
 
 def league_not_allowed(settings: dict, wallet: str, trade: dict, us_slug: Optional[str] = None) -> Optional[str]:
-    """If this trader is limited to some leagues (settings.trader_leagues[wallet]) and this buy
-    isn't in one of them, the league it is in (or "other"); otherwise None."""
+    """The league this buy is in if this trader may not copy it: it's in their blocked leagues
+    (settings.trader_block_leagues[wallet]), or they're limited to some leagues
+    (settings.trader_leagues[wallet]) and it isn't one of them. Otherwise None."""
+    seen = trade_leagues(trade, us_slug)
+    banned = _leagues((settings.get("trader_block_leagues") or {}).get(wallet.lower())) & seen
+    if banned:
+        return sorted(banned)[0]
     allow = _leagues((settings.get("trader_leagues") or {}).get(wallet.lower()))
     if not allow:
         return None
-    seen = trade_leagues(trade, us_slug)
     return None if allow & seen else (sorted(seen)[0] if seen else "other")
 
 
