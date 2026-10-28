@@ -6,7 +6,7 @@
   "min_his_bet": 0,
   "us_only": true,
   "once_per_market": false,
-  "skip_both_sides": false,
+  "skip_both_sides": true,
   "copy_sells": true,
   "halted": false,
   "kill": false,
