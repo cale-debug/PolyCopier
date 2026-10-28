@@ -613,3 +613,16 @@ def test_no_buys_at_or_above_the_entry_price_cap(tmp_path, monkeypatch):
     monkeypatch.setattr(pm, "best_prices", lambda a: (0.87, 0.89))
     bot.copy(dict(TRADE, price=0.89, transactionHash="0x2"), 1)
     assert "A" in bot.state["positions"]
+
+
+def test_first_trader_in_picks_the_side(tmp_path, monkeypatch):
+    monkeypatch.setattr(pm, "best_prices", lambda a: (0.38, 0.42))
+    monkeypatch.setattr(live_us, "match", lambda slug, event, outcome, title="": ("aec-nfl-bal-no", outcome == "Ravens", None))
+    store = LocalStore(str(tmp_path))
+    store.write("settings.json", {**DEFAULT_SETTINGS, "size_mode": "5", "target": "0xa,0xb", "target_label": "ic4cream, HomeRunHazard",
+                                  "skip_both_sides": True}, "")
+    bot = main.Bot(store)
+    bot.copy(dict(TRADE, asset="R", outcome="Ravens", conditionId="g1", _wallet="0xa", _who="ic4cream"), 1)
+    bot.copy(dict(TRADE, asset="S", outcome="Saints", conditionId="g2", _wallet="0xb", _who="HomeRunHazard"), 1)
+    bot.copy(dict(TRADE, asset="R", outcome="Ravens", conditionId="g1", _wallet="0xb", _who="HomeRunHazard"), 1)
+    assert list(bot.state["positions"]) == ["R"] and bot.state["skipped"]["other side of a market we hold"] == 1

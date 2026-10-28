@@ -295,8 +295,12 @@ class Bot:
             if self.settings.get("once_per_market", False) and asset in self.state["positions"]:
                 return skip(self.state, "already holding")
             cond = t.get("conditionId")
-            if self.settings.get("skip_both_sides", False) and cond and any(
-                    p.get("condition_id") == cond and a != asset for a, p in self.state["positions"].items()):
+            # First in wins: once we hold one side of a market (whoever it was copied from), the
+            # other side is skipped. On Polymarket US a buy of the other side would sell ours anyway.
+            if self.settings.get("skip_both_sides", False) and any(
+                    (cond and p.get("condition_id") == cond and a != asset)
+                    or (us_slug and p.get("us_slug") == us_slug and p.get("long") is not None and p.get("long") != long)
+                    for a, p in self.state["positions"].items()):
                 return skip(self.state, "other side of a market we hold")
             if asset not in self.state["positions"] and len(self.state["positions"]) >= MAX_POSITIONS:
                 return skip(self.state, "too many open positions")
