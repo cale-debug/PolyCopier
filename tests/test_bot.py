@@ -626,3 +626,18 @@ def test_first_trader_in_picks_the_side(tmp_path, monkeypatch):
     bot.copy(dict(TRADE, asset="S", outcome="Saints", conditionId="g2", _wallet="0xb", _who="HomeRunHazard"), 1)
     bot.copy(dict(TRADE, asset="R", outcome="Ravens", conditionId="g1", _wallet="0xb", _who="HomeRunHazard"), 1)
     assert list(bot.state["positions"]) == ["R"] and bot.state["skipped"]["other side of a market we hold"] == 1
+
+
+def test_no_spread_on_the_other_team_of_a_game_we_hold(tmp_path, monkeypatch):
+    monkeypatch.setattr(pm, "best_prices", lambda a: (0.38, 0.42))
+    monkeypatch.setattr(live_us, "match", lambda slug, event, outcome, title="": ("aec-" + slug, True, None))
+    store = LocalStore(str(tmp_path))
+    store.write("settings.json", {**DEFAULT_SETTINGS, "size_mode": "5", "skip_both_sides": True}, "")
+    bot = main.Bot(store)
+    game = dict(TRADE, eventSlug="nfl-bal-no-2026-11-02")
+    bot.copy(dict(game, asset="ML", slug="nfl-bal-no-2026-11-02", outcome="Ravens", conditionId="ml"), 1)
+    bot.copy(dict(game, asset="SP", slug="nfl-bal-no-2026-11-02-spread", outcome="Saints", conditionId="sp"), 1)
+    bot.copy(dict(game, asset="SP2", slug="nfl-bal-no-2026-11-02-spread", outcome="Ravens", conditionId="sp"), 1)
+    bot.copy(dict(game, asset="OU", slug="nfl-bal-no-2026-11-02-total", outcome="Over", conditionId="ou"), 1)
+    assert sorted(bot.state["positions"]) == ["ML", "OU", "SP2"]
+    assert bot.state["skipped"]["other team in a game we hold"] == 1

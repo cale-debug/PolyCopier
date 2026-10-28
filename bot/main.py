@@ -27,6 +27,7 @@ UPKEEP_EVERY = int(os.environ.get("UPKEEP_SECONDS", "120"))    # re-price open p
 HEARTBEAT_EVERY = int(os.environ.get("HEARTBEAT_SECONDS", "300"))
 UPKEEP_BATCH = int(os.environ.get("UPKEEP_BATCH", "150"))
 MAX_POSITIONS = int(os.environ.get("MAX_POSITIONS", "1500"))
+NO_TEAM = {"", "yes", "no", "over", "under", "draw", "tie"}  # outcomes that aren't a team
 RETRY_SELLS_EVERY = int(os.environ.get("RETRY_SELLS_SECONDS", "20"))  # retry unfilled sells
 RUN_SECONDS = int(float(os.environ.get("RUN_MINUTES") or 340) * 60)
 
@@ -302,6 +303,8 @@ class Bot:
                     or (us_slug and p.get("us_slug") == us_slug and p.get("long") is not None and p.get("long") != long)
                     for a, p in self.state["positions"].items()):
                 return skip(self.state, "other side of a market we hold")
+            if self.settings.get("skip_both_sides", False) and self.other_team_held(t):
+                return skip(self.state, "other team in a game we hold")
             if asset not in self.state["positions"] and len(self.state["positions"]) >= MAX_POSITIONS:
                 return skip(self.state, "too many open positions")
             usd = bet_size(self.settings, his_usd)
@@ -370,6 +373,18 @@ class Bot:
                 return skip(self.state, "no buyers")
             sell(self.state, asset, fraction, bid, "copied sell")
             L.info("SELL %.0f%% of %s @ %.3f", fraction * 100, t.get("title"), bid)
+
+    def other_team_held(self, t: dict) -> bool:
+        """True if we already hold a different team in the same game, in any of its markets
+        (Ravens to win vs Saints +7.5 spread). Over/Under and Yes/No bets have no team side."""
+        ev, team = t.get("eventSlug") or "", str(t.get("outcome") or "").strip().lower()
+        if not ev or team in NO_TEAM:
+            return False
+        for p in self.state["positions"].values():
+            other = str(p.get("outcome") or "").strip().lower()
+            if p.get("event_slug") == ev and other not in NO_TEAM and other != team:
+                return True
+        return False
 
     def price_filter(self, b: dict, his_price: float, delay: int) -> Optional[str]:
         """Why this copy is too late, too thin, too wide or too expensive to take; None if it's fine."""
